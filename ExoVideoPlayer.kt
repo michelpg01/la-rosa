@@ -1,10 +1,3 @@
-
-
-==============================
-ARCHIVO: ExoVideoPlayer.kt
-RUTA: C:/Users/Maicol/AndroidStudioProjects/LatinoIPTVpro\app\src\main\java\com\example\latinoiptvpro\ui\components\ExoVideoPlayer.kt
-==============================
-
 @file:OptIn(
     androidx.media3.common.util.UnstableApi::class,
     androidx.compose.material3.ExperimentalMaterial3Api::class
@@ -1129,12 +1122,18 @@ fun ExoVideoPlayer(
             }
         }
 
-        fun triggerControlsTimeout() { showControls = true; controlsTimeout = System.currentTimeMillis() }
+        fun triggerControlsTimeout() {
+            showControls = true
+            controlsTimeout = System.currentTimeMillis()
+        }
 
         LaunchedEffect(controlsTimeout, isPlaying) {
             if (showControls && isPlaying) {
-                delay(4000)
-                if (System.currentTimeMillis() - controlsTimeout >= 3500) showControls = false
+                val hideDelay = if (context.isTv()) 8_000L else 4_000L
+                delay(hideDelay)
+                if (System.currentTimeMillis() - controlsTimeout >= hideDelay - 500L) {
+                    showControls = false
+                }
             }
         }
 
@@ -1376,8 +1375,17 @@ fun ExoVideoPlayer(
 
         var playerSize by remember { mutableStateOf(IntSize.Zero) }
 
-        // 📺 FocusRequesters para TV
+        // 📺 Escalar los controles según el ancho disponible en TV.
+        // En móvil y tablet el factor queda en 1f.
         val isTvDevice = remember { context.isTv() }
+        val playerWidthDp = with(LocalDensity.current) { playerSize.width.toDp() }
+        val tvControlScale = if (isTvDevice && playerSize.width > 0) {
+            (playerWidthDp / 1440.dp).coerceIn(0.78f, 1f)
+        } else {
+            1f
+        }
+
+        // 📺 FocusRequesters para TV
 
         fun restoreRequestedOrientation() {
             activity?.requestedOrientation = if (isTvDevice) {
@@ -1471,20 +1479,31 @@ fun ExoVideoPlayer(
         }
 
         // 📺 Auto-enfocar según el estado de los controles
-        LaunchedEffect(showControls, showEpisodesPanel, isTvDevice, isBuffering, streamError) {
+        LaunchedEffect(
+            showControls,
+            showEpisodesPanel,
+            isTvDevice,
+            isBuffering,
+            streamError,
+            seekBarHasFocus
+        ) {
             if (!isTvDevice) return@LaunchedEffect
             if (showEpisodesPanel) return@LaunchedEffect
+
             if (restoreEpisodesButtonFocus) {
                 delay(120)
                 runCatching { episodesButtonFocusRequester.requestFocus() }
                 restoreEpisodesButtonFocus = false
                 return@LaunchedEffect
             }
+
             if (!showControls) {
                 runCatching { surfaceFocusRequester.requestFocus() }
             } else if (!isBuffering && streamError == null) {
                 delay(300)
-                runCatching { playFocusRequester.requestFocus() }
+                if (showControls && !seekBarHasFocus) {
+                    runCatching { playFocusRequester.requestFocus() }
+                }
             }
         }
 
@@ -1962,8 +1981,12 @@ fun ExoVideoPlayer(
                                                     .clip(CircleShape)
                                                     .background(Color(0xFFE50914))
                                                     .border(
-                                                        width = if (isTvDevice && seekBarHasFocus) 3.dp else 0.dp,
-                                                        color = if (isTvDevice && seekBarHasFocus) Color.White else Color.Transparent,
+                                                        width = if (isTvDevice && seekBarHasFocus) 1.5.dp else 0.dp,
+                                                        color = if (isTvDevice && seekBarHasFocus) {
+                                                            Color.White.copy(alpha = 0.9f)
+                                                        } else {
+                                                            Color.Transparent
+                                                        },
                                                         shape = CircleShape
                                                     )
                                             )
