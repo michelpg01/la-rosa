@@ -1,3 +1,193 @@
+
+
+==============================
+ARCHIVO: build.gradle.kts
+RUTA: C:/Users/Maicol/AndroidStudioProjects/LatinoIPTVpro\app\build.gradle.kts
+==============================
+
+plugins {
+    alias(libs.plugins.android.application)
+    alias(libs.plugins.kotlin.android)
+    alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.kotlin.serialization)
+    alias(libs.plugins.google.services)
+    alias(libs.plugins.ksp)
+}
+
+android {
+
+    namespace = "com.example.latinoiptvpro"
+    compileSdk = 35
+
+    defaultConfig {
+        applicationId = "com.example.latinoiptvpro"
+        minSdk = 26
+        targetSdk = 35
+        versionCode = 6
+        versionName = "1.5"
+        vectorDrawables {
+            useSupportLibrary = true
+        }
+    }
+
+    signingConfigs {
+        create("release") {
+            storeFile = file("D:/key_app/latinoiptvpro.keystore")
+            storePassword = "aithanna02"
+            keyAlias = "latinoiptvpro"
+            keyPassword = "aithanna02"
+        }
+    }
+
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("armeabi-v7a", "arm64-v8a")
+            isUniversalApk = false
+        }
+    }
+
+    buildTypes {
+        release {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+            signingConfig = signingConfigs.getByName("release")
+        }
+        debug {
+            isMinifyEnabled = false
+            isShrinkResources = false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+        isCoreLibraryDesugaringEnabled = true
+    }
+
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+
+    buildFeatures {
+        compose = true
+    }
+
+    composeOptions {
+        kotlinCompilerExtensionVersion = "1.5.14"
+    }
+
+    packaging {
+        resources {
+            excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        }
+    }
+
+    ksp {
+        arg("room.schemaLocation", "$projectDir/schemas")
+        arg("room.incremental", "true")
+        arg("room.generateKotlin", "true")
+    }
+}
+
+dependencies {
+
+    // =========================================================
+    // CORE & UI
+    // =========================================================
+    implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.activity.compose)
+    implementation(platform(libs.androidx.compose.bom))
+    implementation(libs.androidx.ui)
+    implementation("androidx.compose.material:material")
+    implementation("androidx.compose.material3:material3:1.3.1")
+    implementation(libs.androidx.ui.tooling.preview)
+    implementation(libs.androidx.material.icons.extended)
+    debugImplementation(libs.androidx.ui.tooling)
+    implementation("org.jsoup:jsoup:1.17.2")
+    implementation("androidx.media3:media3-exoplayer-dash:1.5.1")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    // =========================================================
+    // NAVIGATION
+    // =========================================================
+    implementation(libs.androidx.navigation.compose)
+
+    // =========================================================
+    // LIFECYCLE
+    // =========================================================
+    implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation(libs.androidx.lifecycle.viewmodel.compose)
+
+    // =========================================================
+    // VLC + MEDIA3 (ExoPlayer)
+    // =========================================================
+    implementation(libs.libvlc.all)
+    implementation(libs.androidx.media3.exoplayer)
+    implementation(libs.androidx.media3.ui)
+    implementation(libs.androidx.media3.common)
+    implementation(libs.androidx.media3.exoplayer.hls)
+    implementation("androidx.media3:media3-datasource-okhttp:1.5.1")
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
+    implementation("org.jellyfin.media3:media3-ffmpeg-decoder:1.3.1+2")
+
+    // =========================================================
+    // IMAGES
+    // =========================================================
+    implementation(libs.coil.compose)
+
+    // =========================================================
+    // DATASTORE
+    // =========================================================
+    implementation(libs.datastore.preferences)
+
+    // =========================================================
+    // SERIALIZATION
+    // =========================================================
+    implementation(libs.kotlinx.serialization.json)
+
+    // =========================================================
+    // FIREBASE
+    // =========================================================
+    implementation(platform(libs.firebase.bom))
+    implementation(libs.firebase.firestore.ktx)
+    implementation(libs.firebase.analytics.ktx)
+
+    // =========================================================
+    // ROOM DATABASE
+    // =========================================================
+    implementation(libs.room.runtime)
+    implementation(libs.room.ktx)
+    ksp(libs.room.compiler)
+
+    // =========================================================
+    // PAGING 3
+    // =========================================================
+    implementation(libs.paging.runtime)
+    implementation(libs.paging.compose)
+
+    // =========================================================
+    // JSON
+    // =========================================================
+    implementation(libs.gson)
+    implementation(libs.json)
+
+    // =========================================================
+    // PROFILEINSTALLER (para Baseline Profiles manual)
+    // =========================================================
+    implementation(libs.androidx.profileinstaller)
+}
+
+==============================
+ARCHIVO: UpdateManager.kt
+RUTA: C:/Users/Maicol/AndroidStudioProjects/LatinoIPTVpro\app\src\main\java\com\example\latinoiptvpro\update\UpdateManager.kt
+==============================
+
 package com.example.latinoiptvpro.update
 
 import android.app.Activity
