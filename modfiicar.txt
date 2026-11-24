@@ -1,0 +1,3345 @@
+
+
+==============================
+ARCHIVO: M3uMovieDetailScreen.kt
+RUTA: C:/Users/Maicol/AndroidStudioProjects/LatinoIPTVpro\app\src\main\java\com\example\latinoiptvpro\ui\m3u\M3uMovieDetailScreen.kt
+==============================
+
+package com.example.latinoiptvpro.ui.m3u
+
+import android.app.Activity
+import android.app.Application
+import android.content.Context
+import android.content.pm.ActivityInfo
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import android.webkit.CookieManager
+import android.webkit.WebStorage
+import android.widget.Toast
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.*
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.CastConnected
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.rounded.Dns
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
+import androidx.lifecycle.viewmodel.compose.viewModel
+import coil.compose.AsyncImage
+import coil.request.ImageRequest
+import com.example.latinoiptvpro.ui.catalog.SharedCatalogViewModel
+import com.example.latinoiptvpro.ui.catalog.SharedCatalogViewModelFactory
+import com.example.latinoiptvpro.ui.components.AppVideoPlayer
+import com.example.latinoiptvpro.ui.components.EmbedVideoPlayer
+import com.example.latinoiptvpro.ui.components.ExoVideoPlayer
+import com.example.latinoiptvpro.ui.components.PlayerUiState
+import com.example.latinoiptvpro.ui.components.TrackState
+import com.example.latinoiptvpro.ui.components.VodPlayerHolder
+import com.example.latinoiptvpro.ui.components.hideSystemBarsCompatExo
+import com.example.latinoiptvpro.ui.components.showSystemBarsCompatExo
+import com.example.latinoiptvpro.utils.ExternalCaster
+import com.example.latinoiptvpro.utils.isTv
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.platform.LocalConfiguration
+import com.example.latinoiptvpro.utils.SupabaseFailReporter
+import com.example.latinoiptvpro.utils.VideoExtractor
+import com.example.latinoiptvpro.utils.WorkerResolver
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+private fun isWifiConnected(context: Context): Boolean {
+    val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+    val network = connectivityManager.activeNetwork ?: return false
+    val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return false
+    return capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+}
+
+private fun extractYear(title: String): String =
+    Regex("\\((\\d{4})\\)").find(title)?.groupValues?.get(1) ?: ""
+
+private fun cleanTitle(title: String): String =
+    title.replace(Regex("\\(\\d{4}\\)|\\[.*?\\]|\\{.*?\\}"), "").trim()
+
+
+@Composable
+fun M3uMovieDetailScreen(
+    movie: M3uChannel,
+    listId: String,
+    tmdbInfo: TmdbMediaInfo?,
+    tmdbLoading: Boolean,
+    allMovies: List<M3uChannel>,
+    onMovieClick: (M3uChannel) -> Unit,
+    onBack: () -> Unit,
+    onMyListChanged: () -> Unit = {}
+) {
+    val context = LocalContext.current
+    val isTvDevice = remember { context.isTv() }
+    val application = context.applicationContext as Application
+    val sharedCatalogViewModel: SharedCatalogViewModel = viewModel(
+        factory = SharedCatalogViewModelFactory(application)
+    )
+    val activity = context as? Activity
+
+    fun restoreRequestedOrientation() {
+        activity?.requestedOrientation = if (isTvDevice) {
+            ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        } else {
+            ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT
+        }
+    }
+
+    val scrollState = rememberScrollState()
+    val backFocusRequester = remember(movie.url) { FocusRequester() }
+    val playFocusRequester = remember(movie.url) { FocusRequester() }
+    val serverSelectorFocusRequester = remember(movie.url) { FocusRequester() }
+    val firstSimilarPosterFocusRequester = remember(movie.url) { FocusRequester() }
+    val trackState = remember { TrackState() }
+    val coroutineScope = rememberCoroutineScope()
+
+    val liveAllMovies by sharedCatalogViewModel.moviesList.collectAsState()
+    val liveMovie = remember(movie.url, liveAllMovies) {
+        liveAllMovies.firstOrNull { it.url == movie.url } ?: movie
+    }
+    var isInMyList by remember(movie.url) {
+        mutableStateOf(M3uMyListStore.contains(context, M3uMyListEntry.MOVIE, movie.url))
+    }
+    val movieSynopsis = tmdbInfo?.overview?.takeIf { it.isNotBlank() }
+        ?: liveMovie.sinopsis.orEmpty()
+    var showFullSynopsis by remember(movie.url) { mutableStateOf(false) }
+
+    LaunchedEffect(movie.url) {
+        scrollState.scrollTo(0)
+        WorkerResolver.getSessionToken(context)
+    }
+
+    var currentStreamUrl by remember { mutableStateOf<String?>(null) }
+    var currentEpTitle by remember { mutableStateOf("") }
+    var playerKey by remember { mutableStateOf<String?>(null) }
+
+    var activePlayerType by remember { mutableIntStateOf(1) }
+
+    var isExtractingPlay by remember { mutableStateOf(false) }
+    var isExtractingCast by remember { mutableStateOf(false) }
+    var showCastDialog by remember { mutableStateOf(false) }
+    var castStreamUrl by remember { mutableStateOf<String?>(null) }
+    var castReferer by remember { mutableStateOf<String?>(null) }
+    var castCookies by remember { mutableStateOf("") }
+
+    var currentReferer by remember { mutableStateOf<String?>(null) }
+    var currentRefererFallback by remember { mutableStateOf<String?>(null) }
+    var isSilentMode by remember { mutableStateOf(false) }
+    var preExtractedCookies by remember { mutableStateOf("") }
+
+    var showServerDeadOverlay by remember { mutableStateOf(false) }
+    var serverDeadMessageText by remember { mutableStateOf("") }
+    var showNoServersOverlay by remember { mutableStateOf(false) }
+
+    val servers = remember(movie.url, liveMovie.servers) {
+        liveMovie.servers.ifEmpty {
+            listOf(M3uServer("Servidor Único", movie.url, liveMovie.isEmbed))
+        }
+    }
+
+    var selectedServer by remember(movie.url, servers) { mutableStateOf(servers.first()) }
+    var expandedServers by remember { mutableStateOf(false) }
+    var retryCount by remember { mutableIntStateOf(0) }
+
+    var similarMoviesByApi by remember { mutableStateOf<List<M3uChannel>>(emptyList()) }
+
+    LaunchedEffect(movie.url, allMovies.size, allMovies.hashCode()) {
+        withContext(Dispatchers.Default) {
+            val snapshotMovies = allMovies
+            val genre = liveMovie.genre
+            val byGenre = if (!genre.isNullOrBlank()) {
+                val genresList = genre.split(Regex("[,|/·]")).map { it.trim().lowercase() }
+                snapshotMovies.filter {
+                    it.url != movie.url &&
+                            !it.genre.isNullOrBlank() &&
+                            it.genre.split(Regex("[,|/·]")).any { g -> genresList.contains(g.trim().lowercase()) }
+                }.shuffled()
+            } else emptyList()
+
+            val finalList = if (byGenre.size < 10) {
+                val resto = snapshotMovies.filter { it.url != movie.url && !byGenre.contains(it) }.shuffled()
+                (byGenre + resto).take(15)
+            } else {
+                byGenre.take(15)
+            }
+
+            similarMoviesByApi = finalList
+        }
+    }
+
+    val historyEntry = remember(movie.url, listId) {
+        M3uWatchHistoryStore.getEntry(movie.url, M3uWatchType.MOVIE)
+            ?.takeIf { it.listId.isBlank() || it.listId == listId }
+    }
+
+    LaunchedEffect(movie.url, historyEntry, servers) {
+        val savedServerUrl = historyEntry?.serverUrl?.takeIf { it.isNotBlank() }
+        if (savedServerUrl != null) {
+            selectedServer = servers.firstOrNull { it.url == savedServerUrl } ?: selectedServer
+        }
+    }
+
+    val resumePositionMs = remember(historyEntry) {
+        historyEntry?.takeIf { !it.isFinished && it.positionMs > 0L }?.positionMs ?: 0L
+    }
+
+    val shouldResume = resumePositionMs > 0L
+
+    fun saveMovieAsRecent(
+        positionMs: Long = 0L,
+        durationMs: Long = 0L,
+        server: M3uServer? = selectedServer
+    ) {
+        M3uWatchHistoryStore.save(
+            M3uWatchEntry(
+                contentUrl = movie.url,
+                watchType = M3uWatchType.MOVIE,
+                title = liveMovie.title,
+                logoUrl = liveMovie.logo,
+                listId = listId,
+                positionMs = positionMs,
+                durationMs = durationMs,
+                serverName = server?.name.orEmpty(),
+                serverUrl = server?.url.orEmpty()
+            )
+        )
+    }
+
+    fun openServer(server: M3uServer, saveRecent: Boolean = true, isForCast: Boolean = false) {
+        currentEpTitle = liveMovie.title
+
+        if (saveRecent && !isForCast) {
+            saveMovieAsRecent(
+                positionMs = historyEntry?.positionMs ?: 0L,
+                durationMs = historyEntry?.durationMs ?: 0L,
+                server = server
+            )
+        }
+
+        coroutineScope.launch {
+            if (isForCast) isExtractingCast = true else isExtractingPlay = true
+
+            val resolvedUrl = if (WorkerResolver.isWorkerUrl(server.url)) {
+                android.util.Log.d("MOVIE_DETAIL", "🔍 Resolviendo worker en película: ${server.url}")
+                WorkerResolver.resolveIfWorker(server.url, isSeries = false, context = context) ?: server.url
+            } else {
+                server.url
+            }
+            android.util.Log.d("VOD_EXTRACT", "🎬 Resolviendo al click: $resolvedUrl")
+            val result = VideoExtractor.resolve(context, resolvedUrl)
+
+            if (isForCast) {
+                if (result.playerType == 3) {
+                    Toast.makeText(context, "Este servidor no permite Cast directo.", Toast.LENGTH_LONG).show()
+                } else {
+                    castStreamUrl = result.targetUrl
+                    castReferer = result.referer
+                    castCookies = result.cookies
+                    showCastDialog = true
+                }
+                isExtractingCast = false
+            } else {
+                currentStreamUrl = result.targetUrl
+                currentReferer = result.referer
+                currentRefererFallback = null
+                isSilentMode = result.isSilentMode
+                activePlayerType = result.playerType
+                preExtractedCookies = result.cookies
+
+                castStreamUrl = result.targetUrl
+                castReferer = result.referer
+                castCookies = result.cookies
+
+                CookieManager.getInstance().flush()
+                playerKey = server.url
+                isExtractingPlay = false
+            }
+        }
+    }
+
+    val forceNextServer = {
+        val currentIndex = servers.indexOf(selectedServer)
+        if (currentIndex < servers.size - 1) {
+            android.util.Log.w("VOD_EXTRACT", "⚠️ Forzando cambio al siguiente servidor (${currentIndex + 2}/${servers.size})")
+            retryCount = 0
+            selectedServer = servers[currentIndex + 1]
+            currentStreamUrl = null
+            playerKey = null
+            castStreamUrl = null
+            isSilentMode = false
+            VodPlayerHolder.player?.release()
+            VodPlayerHolder.player = null
+            CoroutineScope(Dispatchers.Main).launch {
+                delay(150)
+                openServer(selectedServer, saveRecent = false)
+            }
+        } else {
+            android.util.Log.e("VOD_EXTRACT", "❌ No hay más servidores disponibles")
+            showNoServersOverlay = true
+            playerKey = null
+            PlayerUiState.isFullscreen = false
+            restoreRequestedOrientation()
+        }
+    }
+
+    LaunchedEffect(movie.url) {
+        playerKey = null
+        currentStreamUrl = null
+        currentReferer = null
+        currentRefererFallback = null
+        isSilentMode = false
+        castStreamUrl = null
+        retryCount = 0
+        showServerDeadOverlay = false
+        showNoServersOverlay = false
+        serverDeadMessageText = ""
+
+        VodPlayerHolder.player?.release()
+        VodPlayerHolder.player = null
+        PlayerUiState.isFullscreen = false
+
+        WebStorage.getInstance().deleteAllData()
+        CookieManager.getInstance().removeAllCookies(null)
+        CookieManager.getInstance().flush()
+    }
+
+    val triggerServerFallback = {
+        if (retryCount < 3) {
+            retryCount++
+            Toast.makeText(context, "Reintentando... ($retryCount/3)", Toast.LENGTH_SHORT).show()
+            val tempUrl = currentStreamUrl
+            currentStreamUrl = null
+            playerKey = null
+
+            CoroutineScope(Dispatchers.Main).launch {
+                delay(800)
+                currentStreamUrl = tempUrl
+                playerKey = tempUrl
+            }
+        } else {
+            // ✅ REPORTAR FALLO FINAL ANTES DE CAMBIAR DE SERVIDOR
+            SupabaseFailReporter.reportCanalFail(context, movie.url, selectedServer.url)
+            forceNextServer()
+        }
+    }
+
+    val isFullscreen = PlayerUiState.isFullscreen
+
+    BackHandler(enabled = true) {
+        if (isFullscreen) {
+            PlayerUiState.isFullscreen = false
+            restoreRequestedOrientation()
+        } else {
+            onBack()
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+    ) {
+        IconButton(
+            onClick = {
+                if (isFullscreen) {
+                    PlayerUiState.isFullscreen = false
+                    restoreRequestedOrientation()
+                } else {
+                    onBack()
+                }
+            },
+            modifier = Modifier
+                .focusProperties { down = playFocusRequester }
+                .focusRequester(backFocusRequester)
+                .align(Alignment.TopStart)
+                .padding(16.dp)
+                .zIndex(10f)
+                .background(Color.Black.copy(alpha = 0.5f), CircleShape)
+        ) {
+            Icon(
+                Icons.AutoMirrored.Filled.ArrowBack,
+                contentDescription = "Atrás",
+                tint = Color.White,
+                modifier = Modifier.size(28.dp)
+            )
+        }
+
+        if (!isFullscreen) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(scrollState)
+            ) {
+                var bannerHasFocus by remember { mutableStateOf(false) }
+                var playButtonHasFocus by remember(movie.url) { mutableStateOf(false) }
+                var myListButtonHasFocus by remember(movie.url) { mutableStateOf(false) }
+                var synopsisButtonHasFocus by remember(movie.url) { mutableStateOf(false) }
+                var serverSelectorHasFocus by remember(movie.url) { mutableStateOf(false) }
+                val myListButtonColor by animateColorAsState(
+                    targetValue = if (isInMyList) Color(0xFF2E6B4F) else Color(0xFF414A56),
+                    animationSpec = tween(durationMillis = 220),
+                    label = "movie_my_list_color"
+                )
+                val screenConfiguration = LocalConfiguration.current
+                val screenWidthDp = screenConfiguration.screenWidthDp
+                val screenHeightDp = screenConfiguration.screenHeightDp
+                val isLargeScreen = isTvDevice || screenWidthDp >= 600   // 📺 TV o 💻 tablet
+                val openMovieFullscreen: () -> Unit = {
+                    if (isLargeScreen) {
+                        PlayerUiState.isFullscreen = true
+                        activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                        activity?.hideSystemBarsCompatExo()
+                    }
+                    openServer(selectedServer, saveRecent = true)
+                }
+
+// 📺 En TV el foco inicial cae directamente en el botón Reproducir.
+                LaunchedEffect(playerKey, isTvDevice, movie.url) {
+                    if (playerKey == null && isTvDevice) {
+                        delay(300)
+                        runCatching { playFocusRequester.requestFocus() }
+                    }
+                }
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .then(
+                            if (isTvDevice) {
+                                Modifier.height((screenHeightDp * 0.52f).coerceIn(300f, 420f).dp)
+                            } else {
+                                Modifier.aspectRatio(16f / 9f)
+                            }
+                        )
+                        // En teléfono/tablet se conserva el comportamiento anterior del banner.
+                        .then(
+                            if (isTvDevice) Modifier else Modifier
+                                .scale(if (bannerHasFocus) 1.02f else 1f)
+                                .zIndex(if (bannerHasFocus) 1f else 0f)
+                                .onFocusChanged { bannerHasFocus = it.hasFocus }
+                                .clickable(enabled = playerKey == null) { openMovieFullscreen() }
+                        )
+                        .border(
+                            width = if (!isTvDevice && bannerHasFocus) 4.dp else 0.dp,
+                            color = if (!isTvDevice && bannerHasFocus) Color.White else Color.Transparent,
+                            shape = RoundedCornerShape(if (isTvDevice) 16.dp else 12.dp)
+                        )
+                        .background(Color(0xFF101826))
+                ) {
+                    if (playerKey == null) {
+                        val backdrop = tmdbInfo?.backdropPath?.takeIf { it.isNotEmpty() } ?: liveMovie.logo
+                        val backdropRequest = remember(backdrop, movie.url, isTvDevice) {
+                            ImageRequest.Builder(context)
+                                .data(if (backdrop.startsWith("/")) "https://image.tmdb.org/t/p/${if (isTvDevice) "original" else "w1280"}$backdrop" else backdrop)
+                                .size(if (isTvDevice) 1920 else 1280)
+                                .memoryCacheKey("${movie.url}_$backdrop")
+                                .crossfade(true)
+                                .build()
+                        }
+                        AsyncImage(
+                            model = backdropRequest,
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            alignment = Alignment.TopCenter,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                        Box(
+                            Modifier
+                                .fillMaxSize()
+                                .background(
+                                    if (isTvDevice) {
+                                        Brush.verticalGradient(
+                                            colorStops = arrayOf(
+                                                0f to Color.Transparent,
+                                                0.34f to Color.Transparent,
+                                                0.56f to Color.Black.copy(alpha = 0.18f),
+                                                0.78f to Color.Black.copy(alpha = 0.62f),
+                                                1f to Color.Black.copy(alpha = 0.96f)
+                                            )
+                                        )
+                                    } else {
+                                        Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(0.82f)))
+                                    }
+                                )
+                        )
+                        if (isTvDevice) {
+                            Box(
+                                Modifier
+                                    .fillMaxSize()
+                                    .background(
+                                        Brush.horizontalGradient(
+                                            listOf(Color.Black.copy(alpha = 0.72f), Color.Black.copy(alpha = 0.22f), Color.Transparent)
+                                        )
+                                    )
+                            )
+                            Column(
+                                modifier = Modifier
+                                    .align(Alignment.BottomStart)
+                                    .padding(start = 32.dp, end = 32.dp, bottom = 24.dp),
+                                horizontalAlignment = Alignment.Start
+                            ) {
+                                val heroTitle = if (!liveMovie.year.isNullOrBlank()) "${liveMovie.title} (${liveMovie.year})" else liveMovie.title
+                                Text(
+                                    text = heroTitle,
+                                    color = Color.White,
+                                    fontSize = 28.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                val movieTags = listOfNotNull(
+                                    liveMovie.language?.takeIf { it.isNotBlank() },
+                                    liveMovie.quality?.takeIf { it.isNotBlank() }
+                                )
+                                if (movieTags.isNotEmpty()) {
+                                    Spacer(Modifier.height(6.dp))
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        movieTags.forEach { tag ->
+                                            Text(
+                                                text = tag,
+                                                color = Color.White.copy(alpha = 0.9f),
+                                                fontSize = 10.sp,
+                                                fontWeight = FontWeight.SemiBold,
+                                                modifier = Modifier
+                                                    .background(Color.White.copy(alpha = 0.16f), RoundedCornerShape(4.dp))
+                                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                                if (movieSynopsis.isNotBlank()) {
+                                    Spacer(Modifier.height(8.dp))
+                                    Text(
+                                        text = movieSynopsis,
+                                        color = Color.White.copy(alpha = 0.94f),
+                                        fontSize = 14.sp,
+                                        lineHeight = 19.sp,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                }
+                                Spacer(Modifier.height(12.dp))
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Button(
+                                        onClick = { if (!isExtractingPlay) openMovieFullscreen() },
+                                        modifier = Modifier
+                                            .focusProperties {
+                                                up = backFocusRequester
+                                                if (isTvDevice) down = serverSelectorFocusRequester
+                                            }
+                                            .focusRequester(playFocusRequester)
+                                            .onFocusChanged { playButtonHasFocus = it.isFocused }
+                                            .border(
+                                                width = if (isTvDevice && playButtonHasFocus) 1.5.dp else 0.dp,
+                                                color = if (isTvDevice && playButtonHasFocus) {
+                                                    Color.White.copy(alpha = 0.9f)
+                                                } else {
+                                                    Color.Transparent
+                                                },
+                                                shape = RoundedCornerShape(8.dp)
+                                            )
+                                            .zIndex(if (playButtonHasFocus) 1f else 0f),
+                                        shape = RoundedCornerShape(8.dp),
+                                        contentPadding = PaddingValues(horizontal = 18.dp, vertical = 10.dp),
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = if (shouldResume) Color(0xFFE50914) else Color.White,
+                                            contentColor = if (shouldResume) Color.White else Color.Black
+                                        )
+                                    ) {
+                                        if (isExtractingPlay) {
+                                            CircularProgressIndicator(
+                                                color = if (shouldResume) Color.White else Color.Black,
+                                                modifier = Modifier.size(22.dp),
+                                                strokeWidth = 2.dp
+                                            )
+                                        } else {
+                                            Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(24.dp))
+                                        }
+                                        Spacer(Modifier.width(8.dp))
+                                        Text(
+                                            text = when {
+                                                isExtractingPlay -> "Conectando…"
+                                                shouldResume -> "Reanudar"
+                                                else -> "Reproducir"
+                                            },
+                                            fontSize = 16.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                    Button(
+                                        onClick = {
+                                            isInMyList = M3uMyListStore.toggle(
+                                                context,
+                                                M3uMyListEntry(
+                                                    mediaType = M3uMyListEntry.MOVIE,
+                                                    mediaId = liveMovie.url,
+                                                    title = liveMovie.title,
+                                                    logo = liveMovie.logo,
+                                                    year = liveMovie.year.orEmpty(),
+                                                    language = liveMovie.language.orEmpty(),
+                                                    quality = liveMovie.quality.orEmpty()
+                                                )
+                                            )
+                                            onMyListChanged()
+                                        },
+                                        modifier = Modifier
+                                            .onFocusChanged { myListButtonHasFocus = it.isFocused }
+                                            .border(
+                                                width = if (isTvDevice && myListButtonHasFocus) 1.5.dp else 0.dp,
+                                                color = if (isTvDevice && myListButtonHasFocus) {
+                                                    Color.White.copy(alpha = 0.9f)
+                                                } else {
+                                                    Color.Transparent
+                                                },
+                                                shape = RoundedCornerShape(8.dp)
+                                            )
+                                            .zIndex(if (myListButtonHasFocus) 1f else 0f),
+                                        shape = RoundedCornerShape(8.dp),
+                                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
+                                        colors = ButtonDefaults.buttonColors(containerColor = myListButtonColor, contentColor = Color.White)
+                                    ) {
+                                        Icon(if (isInMyList) Icons.Default.Check else Icons.Default.Add, contentDescription = null, modifier = Modifier.size(20.dp))
+                                        Spacer(Modifier.width(6.dp))
+                                        Text(if (isInMyList) "En Mi lista" else "Mi lista", fontWeight = FontWeight.SemiBold)
+                                    }
+                                    if (movieSynopsis.isNotBlank()) {
+                                        TextButton(
+                                            onClick = { showFullSynopsis = true },
+                                            modifier = Modifier
+                                                .onFocusChanged { synopsisButtonHasFocus = it.isFocused }
+                                                .border(
+                                                    width = if (isTvDevice && synopsisButtonHasFocus) 1.5.dp else 0.dp,
+                                                    color = if (isTvDevice && synopsisButtonHasFocus) {
+                                                        Color.White.copy(alpha = 0.9f)
+                                                    } else {
+                                                        Color.Transparent
+                                                    },
+                                                    shape = RoundedCornerShape(8.dp)
+                                                )
+                                                .zIndex(if (synopsisButtonHasFocus) 1f else 0f),
+                                            colors = ButtonDefaults.textButtonColors(contentColor = Color.White)
+                                        ) {
+                                            Text("Ver sinopsis completa", fontWeight = FontWeight.SemiBold)
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            Column(
+                                modifier = Modifier.align(Alignment.Center),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(72.dp)
+                                        .animatedCircleGlow(isActive = bannerHasFocus && !shouldResume, color1 = Color(0xFFFF4500), color2 = Color(0xFFFFD700))
+                                        .clip(CircleShape)
+                                        .background(
+                                            Brush.radialGradient(
+                                                colors = if (shouldResume) {
+                                                    listOf(Color(0xFFE50914), Color(0xFFB20710))
+                                                } else {
+                                                    listOf(Color(0xFFFFD700), Color(0xFFFF4500))
+                                                }
+                                            )
+                                        ),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    if (isExtractingPlay) {
+                                        CircularProgressIndicator(color = Color.White, modifier = Modifier.size(32.dp), strokeWidth = 3.dp)
+                                    } else {
+                                        Icon(Icons.Default.PlayArrow, contentDescription = "Reproducir", tint = Color.White, modifier = Modifier.size(40.dp))
+                                    }
+                                }
+                                Spacer(Modifier.height(10.dp))
+                                Text(
+                                    text = if (shouldResume) "REANUDAR" else "VER PELÍCULA",
+                                    color = Color.White,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    letterSpacing = 1.5.sp
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(16.dp))
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(52.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Brush.horizontalGradient(listOf(Color(0xFF1E2A3A), Color(0xFF111827))))
+                            .border(
+                                width = if (isTvDevice && serverSelectorHasFocus) 1.5.dp else 1.dp,
+                                color = if (isTvDevice && serverSelectorHasFocus) {
+                                    Color.White.copy(alpha = 0.9f)
+                                } else {
+                                    Color(0xFF3B82F6).copy(alpha = 0.5f)
+                                },
+                                shape = RoundedCornerShape(12.dp)
+                            )
+                            .focusRequester(serverSelectorFocusRequester)
+                            .focusProperties {
+                                if (isTvDevice) {
+                                    up = playFocusRequester
+                                    if (similarMoviesByApi.isNotEmpty()) down = firstSimilarPosterFocusRequester
+                                }
+                            }
+                            .onFocusChanged { serverSelectorHasFocus = it.isFocused }
+                            .clickable { expandedServers = true }
+                            .padding(horizontal = 16.dp),
+                        contentAlignment = Alignment.CenterStart
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                            Icon(Icons.Rounded.Dns, null, tint = Color(0xFF3B82F6), modifier = Modifier.size(20.dp))
+                            Spacer(Modifier.width(10.dp))
+                            val lang = if (!selectedServer.language.isNullOrBlank()) " (${selectedServer.language})" else ""
+                            Text("Servidor ${servers.indexOf(selectedServer) + 1}: ${selectedServer.name}$lang", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                            Text("▼", color = Color.Gray, fontSize = 12.sp)
+                        }
+                    }
+
+                    DropdownMenu(
+                        expanded = expandedServers,
+                        onDismissRequest = { expandedServers = false },
+                        modifier = Modifier.background(Color(0xFF1E2A3A)).fillMaxWidth(0.9f)
+                    ) {
+                        servers.forEachIndexed { index, srv ->
+                            val lang = if (!srv.language.isNullOrBlank()) " (${srv.language})" else ""
+                            DropdownMenuItem(
+                                text = { Text("Servidor ${index + 1}: ${srv.name}$lang", color = if (srv == selectedServer) Color(0xFF3B82F6) else Color.White) },
+                                onClick = {
+                                    if (srv != selectedServer) {
+                                        selectedServer = srv
+                                        expandedServers = false
+                                        retryCount = 0
+                                        if (playerKey != null) {
+                                            currentStreamUrl = null
+                                            playerKey = null
+                                            castStreamUrl = null
+                                            isSilentMode = false
+                                            VodPlayerHolder.player?.release()
+                                            VodPlayerHolder.player = null
+                                            CoroutineScope(Dispatchers.Main).launch {
+                                                delay(150)
+                                                openServer(srv, saveRecent = false)
+                                            }
+                                        } else {
+                                            expandedServers = false
+                                        }
+                                    } else {
+                                        expandedServers = false
+                                    }
+                                }
+                            )
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(16.dp))
+
+                val displayTitle = if (!liveMovie.year.isNullOrBlank()) "${liveMovie.title} (${liveMovie.year})" else liveMovie.title
+                if (!isTvDevice) {
+                    Text(text = displayTitle, color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 16.dp))
+                    Spacer(Modifier.height(8.dp))
+                }
+
+                if (!isTvDevice) {
+                    val mobileMyListColor by animateColorAsState(
+                        targetValue = if (isInMyList) Color(0xFF2E6B4F) else Color(0xFF414A56),
+                        animationSpec = tween(durationMillis = 220),
+                        label = "movie_mobile_my_list_color"
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            if (!liveMovie.language.isNullOrBlank()) AssistChip(onClick = {}, label = { Text(liveMovie.language ?: "", fontSize = 10.sp) })
+                            if (!liveMovie.quality.isNullOrBlank()) AssistChip(onClick = {}, label = { Text(liveMovie.quality ?: "", fontSize = 10.sp) })
+                        }
+                        Spacer(Modifier.weight(1f))
+                        TextButton(
+                            onClick = {
+                                isInMyList = M3uMyListStore.toggle(
+                                    context,
+                                    M3uMyListEntry(
+                                        mediaType = M3uMyListEntry.MOVIE,
+                                        mediaId = liveMovie.url,
+                                        title = liveMovie.title,
+                                        logo = liveMovie.logo,
+                                        year = liveMovie.year.orEmpty(),
+                                        language = liveMovie.language.orEmpty(),
+                                        quality = liveMovie.quality.orEmpty()
+                                    )
+                                )
+                                onMyListChanged()
+                            },
+                            colors = ButtonDefaults.textButtonColors(contentColor = mobileMyListColor),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                        ) {
+                            Icon(if (isInMyList) Icons.Default.Check else Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text(if (isInMyList) "En Mi lista" else "Mi lista", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        val isWifi = isWifiConnected(context)
+                        IconButton(
+                            onClick = {
+                                if (castStreamUrl != null) showCastDialog = true
+                                else openServer(selectedServer, saveRecent = false, isForCast = true)
+                            },
+                            enabled = !isExtractingCast && isWifi,
+                            modifier = Modifier.size(40.dp).background(Color(0xFF1E2A3A), CircleShape)
+                        ) {
+                            if (isExtractingCast) CircularProgressIndicator(color = Color.White, modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                            else Icon(Icons.Default.CastConnected, contentDescription = "Transmitir a TV", tint = Color.White, modifier = Modifier.size(22.dp))
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(16.dp))
+                val sinopsis = movieSynopsis
+                if (!isTvDevice && sinopsis.isNotBlank()) {
+                    Row(modifier = Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.Top) {
+                        val posterUrl = liveMovie.logo
+                        if (posterUrl.isNotEmpty()) {
+                            val posterRequest = remember(posterUrl) { ImageRequest.Builder(context).data(posterUrl).size(150).crossfade(false).build() }
+                            AsyncImage(model = posterRequest, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.size(90.dp, 130.dp).clip(RoundedCornerShape(8.dp)))
+                            Spacer(Modifier.width(12.dp))
+                        }
+                        var synopsisTruncated by remember(movie.url, sinopsis) { mutableStateOf(false) }
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = sinopsis,
+                                color = Color(0xFFB0BEC5),
+                                fontSize = 14.sp,
+                                lineHeight = 22.sp,
+                                maxLines = 4,
+                                overflow = TextOverflow.Ellipsis,
+                                onTextLayout = { synopsisTruncated = it.hasVisualOverflow }
+                            )
+                            if (synopsisTruncated) {
+                                TextButton(
+                                    onClick = { showFullSynopsis = true },
+                                    contentPadding = PaddingValues(horizontal = 0.dp, vertical = 2.dp)
+                                ) {
+                                    Text("Ver completo", color = Color(0xFF60A5FA), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                val similarMovies = similarMoviesByApi.distinctBy { it.url }
+                if (similarMovies.isNotEmpty()) {
+                    Spacer(Modifier.height(16.dp))
+                    Text("Más títulos similares", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 16.dp))
+                    Spacer(Modifier.height(8.dp))
+                    LazyRow(contentPadding = PaddingValues(start = 16.dp, end = 16.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        items(similarMovies, key = { sim -> "${sim.url}_similar" }) { sim ->
+                            var similarCardHasFocus by remember(sim.url) { mutableStateOf(false) }
+                            val similarCardBorderWidth =
+                                if (isTvDevice && similarCardHasFocus) 1.5.dp else 0.dp
+                            val similarCardBorderColor =
+                                if (isTvDevice && similarCardHasFocus) {
+                                    Color.White.copy(alpha = 0.9f)
+                                } else {
+                                    Color.Transparent
+                                }
+                            Column(
+                                modifier = Modifier
+                                    .width(140.dp)
+                                    .zIndex(if (similarCardHasFocus) 1f else 0f)
+                                    .onFocusChanged { similarCardHasFocus = it.isFocused }
+                                    .then(if (sim.url == similarMovies.first().url) Modifier.focusRequester(firstSimilarPosterFocusRequester) else Modifier)
+                                    .clickable { onMovieClick(sim) },
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .aspectRatio(2f / 3f)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .border(
+                                            width = similarCardBorderWidth,
+                                            color = similarCardBorderColor,
+                                            shape = RoundedCornerShape(8.dp)
+                                        )
+                                ) {
+                                    val simPosterRequest = remember(sim.logo) {
+                                        ImageRequest.Builder(context).data(sim.logo.ifBlank { null }).size(150).crossfade(false).build()
+                                    }
+                                    AsyncImage(model = simPosterRequest, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                                }
+                                Spacer(Modifier.height(8.dp))
+                                Text(
+                                    text = cleanTitle(sim.title),
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = if (similarCardHasFocus) FontWeight.Bold else FontWeight.Medium,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    lineHeight = 16.sp,
+                                    textAlign = TextAlign.Center,
+                                    modifier = Modifier.fillMaxWidth().height(32.dp)
+                                )
+                                val year = sim.year ?: extractYear(sim.title)
+                                Text(
+                                    text = year,
+                                    color = Color(0xFF9FB0CC),
+                                    fontSize = 11.sp,
+                                    lineHeight = 14.sp,
+                                    maxLines = 1,
+                                    textAlign = TextAlign.Center,
+                                    modifier = Modifier.fillMaxWidth().height(14.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(32.dp))
+            }
+        }
+
+        if (showFullSynopsis && movieSynopsis.isNotBlank()) {
+            AlertDialog(
+                onDismissRequest = { showFullSynopsis = false },
+                title = { Text("Sinopsis completa", fontWeight = FontWeight.Bold) },
+                text = {
+                    Text(
+                        text = movieSynopsis,
+                        color = Color(0xFFCFD8DC),
+                        modifier = Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState())
+                    )
+                },
+                confirmButton = { TextButton(onClick = { showFullSynopsis = false }) { Text("Cerrar") } },
+                containerColor = Color(0xFF1E2A3A),
+                titleContentColor = Color.White,
+                textContentColor = Color(0xFFCFD8DC)
+            )
+        }
+
+        if (showCastDialog && castStreamUrl != null) {
+            AlertDialog(
+                onDismissRequest = { showCastDialog = false },
+                title = { Text("Transmisión Lista", fontWeight = FontWeight.Bold) },
+                text = { Text("El video ha sido extraído correctamente. ¿Deseas abrir Web Video Caster para enviarlo a tu TV?") },
+                confirmButton = {
+                    Button(onClick = {
+                        showCastDialog = false
+                        ExternalCaster.castViaWebcaster(context = context, videoUrl = castStreamUrl!!, title = currentEpTitle.ifEmpty { liveMovie.title }, referer = castReferer, cookies = castCookies)
+                    }, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF3B82F6))) { Text("Aceptar", color = Color.White, fontWeight = FontWeight.Bold) }
+                },
+                dismissButton = { TextButton(onClick = { showCastDialog = false }) { Text("Cancelar", color = Color.LightGray) } },
+                containerColor = Color(0xFF1E2A3A),
+                titleContentColor = Color.White,
+                textContentColor = Color(0xFFCFD8DC)
+            )
+        }
+
+        if (playerKey != null && currentStreamUrl != null) {
+            val playerModifier = if (isFullscreen) Modifier.fillMaxSize().zIndex(100f) else Modifier.fillMaxWidth().aspectRatio(16f / 9f).align(Alignment.TopCenter)
+
+            key(playerKey) {
+                Box(modifier = playerModifier.background(Color.Black)) {
+                    when (activePlayerType) {
+                        1 -> {
+                            ExoVideoPlayer(
+                                url = currentStreamUrl!!,
+                                referer = currentReferer,
+                                channelName = currentEpTitle,
+                                resumePositionMs = resumePositionMs,
+                                preExtractedCookies = preExtractedCookies,
+                                sharedViewModel = sharedCatalogViewModel,
+                                refererFallback = currentRefererFallback ?: "",
+                                originalEmbedUrl = selectedServer.url,
+                                onHardHttpError = { code ->
+                                    android.util.Log.w("VOD_EXTRACT", "⚠️ Error HTTP duro $code en ExoPlayer. Reportando...")
+                                    SupabaseFailReporter.reportCanalFail(context, movie.url, selectedServer.url)
+                                },
+                                onProgressUpdate = { positionMs, durationMs ->
+                                    M3uWatchHistoryStore.updatePosition(contentUrl = movie.url, watchType = M3uWatchType.MOVIE, positionMs = positionMs, durationMs = durationMs)
+                                },
+                                onBackClick = {
+                                    PlayerUiState.isFullscreen = false
+                                    restoreRequestedOrientation()
+                                    playerKey = null
+                                    WebStorage.getInstance().deleteAllData()
+                                    CookieManager.getInstance().removeAllCookies(null)
+                                    CookieManager.getInstance().flush()
+                                }
+                            )
+                        }
+                        2 -> {
+                            AppVideoPlayer(
+                                streamUrl = currentStreamUrl,
+                                isLive = false,
+                                channelName = currentEpTitle,
+                                resumePositionMs = resumePositionMs,
+                                trackState = trackState,
+                                referer = currentReferer,
+                                onError = { triggerServerFallback() },
+                                onProgressUpdate = { positionMs, durationMs ->
+                                    M3uWatchHistoryStore.updatePosition(contentUrl = movie.url, watchType = M3uWatchType.MOVIE, positionMs = positionMs, durationMs = durationMs)
+                                },
+                                onBackClick = {
+                                    val pos = VodPlayerHolder.player?.currentPosition ?: 0L
+                                    val dur = VodPlayerHolder.player?.duration ?: 0L
+                                    M3uWatchHistoryStore.save(M3uWatchEntry(contentUrl = movie.url, watchType = M3uWatchType.MOVIE, title = liveMovie.title, logoUrl = liveMovie.logo, listId = listId, positionMs = pos, durationMs = dur, serverName = selectedServer.name, serverUrl = selectedServer.url))
+                                    if (isFullscreen) {
+                                        PlayerUiState.isFullscreen = false
+                                        restoreRequestedOrientation()
+                                    } else {
+                                        playerKey = null
+                                        WebStorage.getInstance().deleteAllData()
+                                        CookieManager.getInstance().removeAllCookies(null)
+                                        CookieManager.getInstance().flush()
+                                    }
+                                }
+                            )
+                        }
+                        3 -> {
+                            EmbedVideoPlayer(
+                                url = currentStreamUrl!!,
+                                canalUrl = movie.url,
+                                isSilentMode = isSilentMode,
+                                fanartUrl = "",
+                                refererOverride = currentReferer,     // ═══ NUEVO: pasar Referer al iframe ═══
+                                onTimeoutError = {
+                                    // ✅ MOSTRAR OVERLAY Y FORZAR CAMBIO DE SERVIDOR
+                                    android.util.Log.w("VOD_EXTRACT", "⚠️ Timeout o Video no encontrado en: ${selectedServer.name}")
+                                    serverDeadMessageText = "El servidor \"${selectedServer.name}\" no está disponible.\nCambiando de fuente…"
+                                    showServerDeadOverlay = true
+                                    CoroutineScope(Dispatchers.Main).launch {
+                                        delay(1500)
+                                        showServerDeadOverlay = false
+                                        forceNextServer()
+                                    }
+                                },
+                                onEmbedUnavailable = {
+                                    android.util.Log.w("VOD_EXTRACT", "⚠️ Servidor caído detectado: ${selectedServer.name}")
+                                    SupabaseFailReporter.reportCanalFail(context, movie.url, selectedServer.url)
+                                    serverDeadMessageText = "El servidor \"${selectedServer.name}\" no está disponible.\nCambiando de fuente…"
+                                    showServerDeadOverlay = true
+                                    CoroutineScope(Dispatchers.Main).launch {
+                                        delay(1500)
+                                        showServerDeadOverlay = false
+                                        forceNextServer()
+                                    }
+                                },
+                                onM3u8Intercepted = { interceptedUrl, cookies ->
+                                    android.util.Log.d("VOD_EXTRACT", "🔍 Validando stream: $interceptedUrl")
+
+                                    val isDoodstreamStream =
+                                        interceptedUrl.contains("token=", ignoreCase = true) && (
+                                                interceptedUrl.contains("cloudatacdn.com", ignoreCase = true) ||
+                                                        interceptedUrl.contains("dood.video", ignoreCase = true) ||
+                                                        interceptedUrl.contains("doodcdn.io", ignoreCase = true) ||
+                                                        interceptedUrl.contains("ds2play.com", ignoreCase = true)
+                                                )
+
+                                    val isIbraStream =
+                                        interceptedUrl.contains("ibra.lat", ignoreCase = true) ||
+                                                interceptedUrl.contains("cloudwindow-route.com", ignoreCase = true)
+
+                                    val isIbraMaster = isIbraStream && interceptedUrl.contains("?s=", ignoreCase = true)
+                                    val isIbraVariantM3u8 = isIbraStream && interceptedUrl.substringBefore("?").endsWith(".m3u8", ignoreCase = true)
+
+                                    val isValidStream = isIbraStream || isDoodstreamStream ||
+                                            interceptedUrl.contains("master.m3u8", ignoreCase = true) ||
+                                            interceptedUrl.contains("master.txt", ignoreCase = true) ||
+                                            interceptedUrl.contains(".urlset/", ignoreCase = true) ||
+                                            interceptedUrl.contains("hls2-c", ignoreCase = true) ||
+                                            interceptedUrl.substringBefore("?").endsWith(".m3u8", ignoreCase = true) ||
+                                            interceptedUrl.substringBefore("?").endsWith(".mp4", ignoreCase = true) ||
+                                            interceptedUrl.contains(".mp4?", ignoreCase = true) ||
+                                            interceptedUrl.contains("mxcontent.net", ignoreCase = true) ||
+                                            interceptedUrl.contains("dropcdn.io", ignoreCase = true)
+
+                                    android.util.Log.d("VOD_EXTRACT", "🔍 isValidStream=$isValidStream (dood=$isDoodstreamStream, ibra=$isIbraStream, master=$isIbraMaster, variant=$isIbraVariantM3u8)")
+
+                                    if (isValidStream) {
+                                        val alreadyOnIbraMaster = currentStreamUrl?.let { it.contains("ibra.lat") && it.contains("?s=", ignoreCase = true) } == true
+                                        val shouldOverrideWithVariant = isIbraVariantM3u8 && alreadyOnIbraMaster
+
+                                        if (shouldOverrideWithVariant) {
+                                            android.util.Log.d("VOD_EXTRACT", "🔁 Reemplazando master ?s= por variante .m3u8 (más rápida/robusta)")
+                                        } else if (alreadyOnIbraMaster && isIbraMaster) {
+                                            android.util.Log.d("VOD_EXTRACT", "⏭️ Ignorando master duplicado, ya estamos en ExoPlayer")
+                                            return@EmbedVideoPlayer
+                                        }
+
+                                        preExtractedCookies = cookies
+                                        isSilentMode = false
+                                        currentStreamUrl = interceptedUrl
+
+                                        if (interceptedUrl.contains("mxcontent.net", ignoreCase = true)) {
+                                            val embedOrigin = try {
+                                                val u = java.net.URI(selectedServer?.url ?: "")
+                                                if (u.scheme != null && u.host != null) "${u.scheme}://${u.host}/" else "https://mxdrop.click/"
+                                            } catch (_: Exception) { "https://mxdrop.click/" }
+                                            currentReferer = embedOrigin
+                                            currentRefererFallback = "https://miiixdrop.net/"
+                                            android.util.Log.d("VOD_EXTRACT", "🎯 mxcontent.net → Referer=$embedOrigin, fallback=miiixdrop.net")
+                                        } else {
+                                            currentReferer = when {
+                                                isIbraStream -> when {
+                                                    selectedServer?.url?.contains("nupload", ignoreCase = true) == true -> "https://nupload.my/"
+                                                    currentReferer?.contains("nupload", ignoreCase = true) == true -> "https://nupload.my/"
+                                                    else -> currentReferer
+                                                }
+                                                isDoodstreamStream -> when {
+                                                    currentReferer?.contains("playmogo.com", ignoreCase = true) == true -> "https://playmogo.com/"
+                                                    currentReferer?.contains("doodstream.com", ignoreCase = true) == true -> "https://doodstream.com/"
+                                                    currentReferer?.contains("dood.video", ignoreCase = true) == true -> "https://dood.video/"
+                                                    currentReferer?.contains("ds2play.com", ignoreCase = true) == true -> "https://ds2play.com/"
+                                                    else -> currentReferer
+                                                }
+                                                interceptedUrl.contains("dropcdn.io", ignoreCase = true) -> "https://dr0pstream.com/"
+                                                interceptedUrl.contains("streamwish", ignoreCase = true) ||
+                                                        interceptedUrl.contains("playnixes", ignoreCase = true) ||
+                                                        interceptedUrl.contains("hgplaycdn", ignoreCase = true) -> "https://streamwish.to/"
+                                                interceptedUrl.contains("callistanise", ignoreCase = true) ||
+                                                        interceptedUrl.contains("affordablewebinars", ignoreCase = true) ||
+                                                        interceptedUrl.contains("vidhide", ignoreCase = true) -> "https://callistanise.com/"
+                                                interceptedUrl.contains("hanerix", ignoreCase = true) -> "https://hanerix.com/"
+                                                interceptedUrl.contains("sagaciousslumber.site", ignoreCase = true) -> "https://cloudorchestranova.com/"
+                                                interceptedUrl.contains("cloudorchestranova.com", ignoreCase = true) -> "https://vsembed.ru/"
+                                                else -> currentReferer
+                                            }
+                                            currentRefererFallback = null
+                                        }
+
+                                        android.util.Log.d("VOD_EXTRACT", "✅ Transicionando a ExoPlayer: playerType=1, referer=$currentReferer, url=$interceptedUrl")
+                                        activePlayerType = 1
+                                    } else {
+                                        android.util.Log.w("VOD_EXTRACT", "⚠️ Stream rechazado por validador: $interceptedUrl")
+                                    }
+                                },
+                                onBackClick = {
+                                    M3uWatchHistoryStore.save(M3uWatchEntry(contentUrl = movie.url, watchType = M3uWatchType.MOVIE, title = liveMovie.title, logoUrl = liveMovie.logo, listId = listId, positionMs = historyEntry?.positionMs ?: 0L, durationMs = historyEntry?.durationMs ?: 0L, serverName = selectedServer.name, serverUrl = selectedServer.url))
+                                    if (isFullscreen) {
+                                        PlayerUiState.isFullscreen = false
+                                        restoreRequestedOrientation()
+                                    } else {
+                                        playerKey = null
+                                        WebStorage.getInstance().deleteAllData()
+                                        CookieManager.getInstance().removeAllCookies(null)
+                                        CookieManager.getInstance().flush()
+                                    }
+                                }
+                            )
+                        }
+                    }
+
+                    if (showServerDeadOverlay) {
+                        Box(
+                            modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.92f)).zIndex(50f),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                modifier = Modifier.padding(32.dp)
+                            ) {
+                                Icon(Icons.Default.Warning, contentDescription = null, tint = Color(0xFFFFC107), modifier = Modifier.size(72.dp))
+                                Spacer(Modifier.height(16.dp))
+                                Text(text = serverDeadMessageText, color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
+                                Spacer(Modifier.height(24.dp))
+                                CircularProgressIndicator(color = Color(0xFFE50914))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (showNoServersOverlay) {
+            Box(
+                modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.96f)).zIndex(200f),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.padding(32.dp)
+                ) {
+                    Icon(Icons.Default.Warning, contentDescription = null, tint = Color(0xFFE50914), modifier = Modifier.size(80.dp))
+                    Spacer(Modifier.height(20.dp))
+                    Text(
+                        text = "Servidores no disponibles",
+                        color = Color.White,
+                        fontSize = 22.sp,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        text = "Por el momento nuestros servidores no se encuentran disponibles.\nIntenta de nuevo más tarde.",
+                        color = Color.White.copy(alpha = 0.75f),
+                        fontSize = 15.sp,
+                        lineHeight = 22.sp,
+                        textAlign = TextAlign.Center
+                    )
+                    Spacer(Modifier.height(28.dp))
+                    Button(
+                        onClick = {
+                            showNoServersOverlay = false
+                            playerKey = null
+                            currentStreamUrl = null
+                            onBack()
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE50914))
+                    ) {
+                        Text("Volver", color = Color.White, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+==============================
+ARCHIVO: M3uSeriesDetailScreen.kt
+RUTA: C:/Users/Maicol/AndroidStudioProjects/LatinoIPTVpro\app\src\main\java\com\example\latinoiptvpro\ui\m3u\M3uSeriesDetailScreen.kt
+==============================
+
+package com.example.latinoiptvpro.ui.m3u
+
+import android.app.Activity
+import android.app.Application
+import android.content.Context
+import android.content.pm.ActivityInfo
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import android.os.Build
+import android.util.Log
+import android.view.View
+import android.view.WindowInsets
+import android.view.WindowInsetsController
+import android.webkit.CookieManager
+import android.webkit.WebStorage
+import android.widget.Toast
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.*
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.rounded.Dns
+import androidx.compose.material.icons.filled.CastConnected
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.lifecycle.viewmodel.compose.viewModel
+import coil.compose.AsyncImage
+import coil.request.ImageRequest
+import com.example.latinoiptvpro.ui.catalog.SharedCatalogViewModel
+import com.example.latinoiptvpro.ui.catalog.SharedCatalogViewModelFactory
+import com.example.latinoiptvpro.ui.components.AppVideoPlayer
+import com.example.latinoiptvpro.ui.components.EmbedVideoPlayer
+import com.example.latinoiptvpro.ui.components.ExoVideoPlayer
+import com.example.latinoiptvpro.ui.components.PlayerUiState
+import com.example.latinoiptvpro.ui.components.TrackState
+import com.example.latinoiptvpro.ui.components.VodPlayerHolder
+import com.example.latinoiptvpro.ui.components.hideSystemBarsCompatExo
+import com.example.latinoiptvpro.ui.components.showSystemBarsCompatExo
+import com.example.latinoiptvpro.utils.ExternalCaster
+import com.example.latinoiptvpro.utils.isTv
+import com.example.latinoiptvpro.utils.SupabaseFailReporter
+import com.example.latinoiptvpro.utils.VideoExtractor
+import com.example.latinoiptvpro.utils.WorkerResolver
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+@Suppress("DEPRECATION")
+private fun Activity.showSystemBarsCompat() {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        window.insetsController?.show(WindowInsets.Type.systemBars())
+    } else {
+        window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
+    }
+}
+
+private fun isWifiConnected(context: Context): Boolean {
+    val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+    val network = connectivityManager.activeNetwork ?: return false
+    val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return false
+    return capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+}
+
+@Composable
+fun Modifier.animatedGlowBorder(
+    isActive: Boolean,
+    color1: Color = Color(0xFFFF4500),
+    color2: Color = Color(0xFFFFD700),
+    animationDuration: Int = 1500
+): Modifier {
+    if (!isActive) return this
+    val infiniteTransition = rememberInfiniteTransition(label = "glow_border")
+    val alpha by infiniteTransition.animateFloat(
+        initialValue = 0.4f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(animationDuration, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "glow_alpha"
+    )
+    val scale by infiniteTransition.animateFloat(
+        initialValue = 0.98f,
+        targetValue = 1.02f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(animationDuration, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "glow_scale"
+    )
+    return this
+        .scale(scale)
+        .border(
+            width = 2.dp,
+            brush = Brush.horizontalGradient(
+                colors = listOf(color1.copy(alpha = alpha), color2.copy(alpha = alpha), color1.copy(alpha = alpha))
+            ),
+            shape = RoundedCornerShape(14.dp)
+        )
+        .shadow(
+            elevation = 8.dp,
+            shape = RoundedCornerShape(14.dp),
+            ambientColor = color1.copy(alpha = alpha),
+            spotColor = color2.copy(alpha = alpha)
+        )
+}
+
+@Composable
+fun Modifier.animatedCircleGlow(
+    isActive: Boolean,
+    color1: Color = Color(0xFFFF4500),
+    color2: Color = Color(0xFFFFD700),
+    animationDuration: Int = 1500
+): Modifier {
+    if (!isActive) return this
+    val infiniteTransition = rememberInfiniteTransition(label = "circle_glow")
+    val alpha by infiniteTransition.animateFloat(
+        initialValue = 0.4f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(animationDuration, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "circle_alpha"
+    )
+    val scale by infiniteTransition.animateFloat(
+        initialValue = 0.95f,
+        targetValue = 1.05f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(animationDuration, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "circle_scale"
+    )
+    return this
+        .scale(scale)
+        .border(
+            width = 3.dp,
+            brush = Brush.radialGradient(
+                colors = listOf(color2.copy(alpha = alpha), color1.copy(alpha = alpha), color2.copy(alpha = alpha))
+            ),
+            shape = CircleShape
+        )
+        .shadow(
+            elevation = 12.dp,
+            shape = CircleShape,
+            ambientColor = color1.copy(alpha = alpha),
+            spotColor = color2.copy(alpha = alpha)
+        )
+}
+
+@Composable
+private fun EpisodeItem(
+    episode: M3uChannel,
+    isSelected: Boolean,
+    listId: String,
+    onClick: () -> Unit,
+    focusRequester: FocusRequester? = null,
+    onMoveUp: (() -> Unit)? = null,
+    onMoveDown: (() -> Unit)? = null
+) {
+    val context = LocalContext.current
+    val isTvDevice = remember { context.isTv() }
+    var hasFocus by remember(episode.url) { mutableStateOf(false) }
+    val focusScale by animateFloatAsState(
+        targetValue = if (isTvDevice && hasFocus) 1.02f else 1f,
+        animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+        label = "episode_focus_scale"
+    )
+    val entry = remember(episode.url, listId) {
+        M3uWatchHistoryStore.getEntry(episode.url, M3uWatchType.SERIES)
+            ?.takeIf { it.listId.isBlank() || it.listId == listId }
+    }
+    val progress = entry?.takeIf { !it.isFinished }?.progressPercent ?: 0
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .zIndex(if (hasFocus) 1f else 0f)
+            .graphicsLayer { scaleX = focusScale; scaleY = focusScale }
+            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+            .onKeyEvent { event ->
+                if (!isTvDevice || event.type != KeyEventType.KeyDown) {
+                    false
+                } else if (event.nativeKeyEvent.repeatCount > 0) {
+                    true
+                } else when (event.key) {
+                    Key.DirectionUp -> { onMoveUp?.invoke(); true }
+                    Key.DirectionDown -> { onMoveDown?.invoke(); true }
+                    else -> false
+                }
+            }
+            .clip(RoundedCornerShape(14.dp))
+            .animatedGlowBorder(isActive = isSelected && !isTvDevice, color1 = Color(0xFFFF4500), color2 = Color(0xFFFFD700))
+            .background(
+                when {
+                    isTvDevice && hasFocus -> Color(0xFF2E415C)
+                    isSelected -> Color(0xFF1B2636)
+                    else -> Color(0xFF111111)
+                }
+            )
+            .then(
+                if (isTvDevice) Modifier.border(
+                    width = if (hasFocus) 1.5.dp else if (isSelected) 1.dp else 0.dp,
+                    color = if (hasFocus) Color.White.copy(alpha = 0.9f) else Color(0xFF36D760),
+                    shape = RoundedCornerShape(14.dp)
+                ) else Modifier
+            )
+            .onFocusChanged { hasFocus = it.isFocused }
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick
+            )
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(12.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .width(82.dp)
+                    .height(54.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color(0xFF202020)),
+                contentAlignment = Alignment.Center
+            ) {
+                if (episode.logo.isNotBlank()) {
+                    val episodeImageRequest = remember(episode.logo, episode.url) {
+                        ImageRequest.Builder(context)
+                            .data(episode.logo)
+                            .size(100)
+                            .memoryCacheKey("${episode.url}_${episode.logo}")
+                            .crossfade(false)
+                            .build()
+                    }
+                    AsyncImage(
+                        model = episodeImageRequest,
+                        contentDescription = episode.title,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    Text(
+                        text = "EP",
+                        color = Color.White.copy(alpha = 0.6f),
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = episode.title,
+                    color = Color.White,
+                    fontSize = 14.sp,
+                    fontWeight = if (isSelected || hasFocus) FontWeight.Bold else FontWeight.Medium,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(Modifier.height(4.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (!episode.language.isNullOrBlank()) {
+                        Text(
+                            text = episode.language ?: "",
+                            color = Color(0xFFB0BEC5),
+                            fontSize = 11.sp
+                        )
+                    }
+                    if (!episode.quality.isNullOrBlank()) {
+                        Text(
+                            text = episode.quality ?: "",
+                            color = Color(0xFF90CAF9),
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                    if (progress > 0) {
+                        Text(
+                            text = "$progress%",
+                            color = Color(0xFF81C784),
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+        }
+        if (progress > 0) {
+            LinearProgressIndicator(
+                progress = { progress / 100f },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(3.dp),
+                color = Color(0xFF4CAF50),
+                trackColor = Color.White.copy(alpha = 0.1f)
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun M3uSeriesDetailScreen(
+    seriesName: String,
+    listId: String,
+    episodesFlatList: List<M3uChannel>,
+    tmdbInfo: TmdbMediaInfo?,
+    tmdbLoading: Boolean,
+    onBack: () -> Unit,
+    onMyListChanged: () -> Unit = {}
+) {
+    val context = LocalContext.current
+    val isTvDevice = remember { context.isTv() }
+    var isInMyList by remember(seriesName) {
+        mutableStateOf(M3uMyListStore.contains(context, M3uMyListEntry.SERIES, seriesName))
+    }
+    val application = context.applicationContext as Application
+    val sharedCatalogViewModel: SharedCatalogViewModel = viewModel(
+        factory = SharedCatalogViewModelFactory(application)
+    )
+    val activity = context as? Activity
+
+    fun restoreRequestedOrientation() {
+        activity?.requestedOrientation = if (isTvDevice) {
+            ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        } else {
+            ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT
+        }
+    }
+
+    val scope = rememberCoroutineScope()
+    val listState = rememberLazyListState()
+    val backFocusRequester = remember(seriesName) { FocusRequester() }
+    val playFocusRequester = remember(seriesName) { FocusRequester() }
+    val serverSelectorFocusRequester = remember(seriesName) { FocusRequester() }
+    val seasonSelectorFocusRequester = remember(seriesName) { FocusRequester() }
+    val firstEpisodeFocusRequester = remember(seriesName) { FocusRequester() }
+    val episodeFocusRequesters = remember(seriesName) { mutableMapOf<String, FocusRequester>() }
+    fun episodeFocusKey(episode: M3uChannel): String =
+        "${episode.url}_${episode.seasonNum}_${episode.episodeNum}"
+    val trackState = remember { TrackState() }
+
+    val liveAllSeries by sharedCatalogViewModel.seriesMap.collectAsState()
+    val liveEpisodes = remember(seriesName, liveAllSeries) {
+        liveAllSeries[seriesName] ?: episodesFlatList
+    }
+
+    LaunchedEffect(seriesName) {
+        WorkerResolver.getSessionToken(context)
+    }
+
+    val sortedEpisodes by remember(liveEpisodes) {
+        derivedStateOf {
+            liveEpisodes
+                .distinctBy { "${it.seasonNum}_${it.episodeNum}_${it.cleanTitle.lowercase()}" }
+                .sortedWith(
+                    compareBy<M3uChannel> { it.seasonNum }
+                        .thenBy { it.episodeNum }
+                        .thenBy { it.title }
+                )
+        }
+    }
+
+    val groupedBySeason by remember(sortedEpisodes) {
+        derivedStateOf {
+            sortedEpisodes.groupBy { episode ->
+                episode.group.takeIf { it.isNotBlank() } ?: "Temporada ${episode.seasonNum.coerceAtLeast(1)}"
+            }
+        }
+    }
+
+    val seasonNames by remember(groupedBySeason) {
+        derivedStateOf { groupedBySeason.keys.toList() }
+    }
+
+    val episodesCountBySeason by remember(groupedBySeason) {
+        derivedStateOf { groupedBySeason.mapValues { it.value.size } }
+    }
+
+    val lastWatchedEntry = remember(seriesName, listId) {
+        M3uWatchHistoryStore.getSeries()
+            .firstOrNull {
+                (it.listId.isBlank() || it.listId == listId) &&
+                        it.seriesName.equals(seriesName, ignoreCase = true)
+            }
+    }
+
+    var selectedEpisode by remember { mutableStateOf<M3uChannel?>(null) }
+    var selectedSeasonName by remember { mutableStateOf("") }
+    var initialSelectionDone by remember { mutableStateOf(false) }
+    var initialTvPlayFocusRequested by remember(seriesName) { mutableStateOf(false) }
+    var episodeFocusMoveInProgress by remember(seriesName) { mutableStateOf(false) }
+    fun focusEpisodeAt(index: Int) {
+        if (episodeFocusMoveInProgress) return
+        val episodes = groupedBySeason[selectedSeasonName].orEmpty()
+        if (index !in episodes.indices) return
+        val episode = episodes[index]
+        val requester = if (index == 0) {
+            firstEpisodeFocusRequester
+        } else {
+            episodeFocusRequesters.getOrPut(episodeFocusKey(episode)) { FocusRequester() }
+        }
+        episodeFocusMoveInProgress = true
+        scope.launch {
+            try {
+                val focused = runCatching { requester.requestFocus() }.getOrDefault(false)
+                if (!focused) {
+                    runCatching { listState.scrollToItem(index + 1) }
+                    delay(80)
+                    runCatching { requester.requestFocus() }
+                }
+                delay(100)
+            } finally {
+                episodeFocusMoveInProgress = false
+            }
+        }
+    }
+    var showFullSynopsis by remember(seriesName) { mutableStateOf(false) }
+    val seriesSynopsis = tmdbInfo?.overview?.takeIf { it.isNotBlank() }
+        ?: selectedEpisode?.sinopsis.orEmpty()
+
+    LaunchedEffect(sortedEpisodes.isNotEmpty(), lastWatchedEntry) {
+        if (sortedEpisodes.isNotEmpty() && !initialSelectionDone) {
+            val lastEpisode = lastWatchedEntry?.let { entry ->
+                sortedEpisodes.firstOrNull { it.url == entry.contentUrl }
+            }
+
+            selectedEpisode = lastEpisode ?: sortedEpisodes.firstOrNull()
+
+            val lastSeasonName = lastEpisode?.group?.takeIf { it.isNotBlank() }
+                ?: "Temporada ${(lastEpisode?.seasonNum ?: 1).coerceAtLeast(1)}"
+
+            selectedSeasonName = if (lastSeasonName in seasonNames) {
+                lastSeasonName
+            } else {
+                seasonNames.firstOrNull() ?: ""
+            }
+
+            initialSelectionDone = true
+        }
+    }
+
+    LaunchedEffect(selectedSeasonName, groupedBySeason) {
+        if (selectedSeasonName.isNotBlank() && groupedBySeason.isNotEmpty()) {
+            val episodesOfSeason = groupedBySeason[selectedSeasonName] ?: emptyList()
+            if (episodesOfSeason.isNotEmpty() && selectedEpisode !in episodesOfSeason) {
+                selectedEpisode = episodesOfSeason.firstOrNull()
+            }
+        }
+    }
+
+    LaunchedEffect(sortedEpisodes) {
+        val currentUrl = selectedEpisode?.url ?: return@LaunchedEffect
+        val fresh = sortedEpisodes.firstOrNull { it.url == currentUrl }
+        if (fresh != null && fresh !== selectedEpisode) {
+            selectedEpisode = fresh
+            Log.d("SERIES_DETAIL", "♻️ Episodio seleccionado actualizado: ${fresh.title}")
+        }
+    }
+
+    var currentStreamUrl by remember { mutableStateOf<String?>(null) }
+    var currentEpTitle by remember { mutableStateOf("") }
+    var playerKey by remember { mutableStateOf<String?>(null) }
+
+    var activePlayerType by remember { mutableIntStateOf(1) }
+
+    var currentReferer by remember { mutableStateOf<String?>(null) }
+    var currentRefererFallback by remember { mutableStateOf<String?>(null) }
+    var isSilentMode by remember { mutableStateOf(false) }
+
+    var isExtractingPlay by remember { mutableStateOf(false) }
+    var isExtractingCast by remember { mutableStateOf(false) }
+
+    var showCastDialog by remember { mutableStateOf(false) }
+    var castStreamUrl by remember { mutableStateOf<String?>(null) }
+    var castReferer by remember { mutableStateOf<String?>(null) }
+    var castCookies by remember { mutableStateOf("") }
+
+    var retryCount by remember { mutableIntStateOf(0) }
+    var preExtractedCookies by remember { mutableStateOf("") }
+
+    var showServerDeadOverlay by remember { mutableStateOf(false) }
+    var serverDeadMessageText by remember { mutableStateOf("") }
+    var showNoServersOverlay by remember { mutableStateOf(false) }
+
+    val servers = remember(selectedEpisode?.url, selectedEpisode?.servers) {
+        val ep = selectedEpisode ?: return@remember emptyList()
+        ep.servers.ifEmpty {
+            listOf(M3uServer("Servidor Único", ep.url, ep.isEmbed, ep.language))
+        }
+    }
+
+    var selectedServer by remember(selectedEpisode?.url, servers) {
+        mutableStateOf(servers.firstOrNull())
+    }
+    var expandedServers by remember { mutableStateOf(false) }
+
+    LaunchedEffect(initialSelectionDone, lastWatchedEntry, selectedEpisode) {
+        if (initialSelectionDone && selectedEpisode != null && lastWatchedEntry != null) {
+            val savedServerUrl = lastWatchedEntry?.serverUrl
+            if (!savedServerUrl.isNullOrBlank()) {
+                val savedServer = selectedEpisode?.servers?.firstOrNull { it.url == savedServerUrl }
+                if (savedServer != null) {
+                    selectedServer = savedServer
+                }
+            }
+        }
+    }
+
+    val selectedEntry = remember(selectedEpisode?.url, listId) {
+        selectedEpisode?.url?.let { url ->
+            M3uWatchHistoryStore.getEntry(url, M3uWatchType.SERIES)
+                ?.takeIf { it.listId.isBlank() || it.listId == listId }
+        }
+    }
+
+    val resumePositionMs = remember(selectedEntry) {
+        selectedEntry
+            ?.takeIf { !it.isFinished && it.positionMs > 0L }
+            ?.positionMs ?: 0L
+    }
+
+    fun saveEpisodeHistory(
+        episode: M3uChannel,
+        server: M3uServer?,
+        positionMs: Long = 0L,
+        durationMs: Long = 0L
+    ) {
+        M3uWatchHistoryStore.save(
+            M3uWatchEntry(
+                contentUrl = episode.url,
+                watchType = M3uWatchType.SERIES,
+                title = episode.title,
+                logoUrl = episode.logo,
+                listId = listId,
+                seriesName = seriesName,
+                seasonGroup = episode.group.takeIf { it.isNotBlank() }
+                    ?: "Temporada ${episode.seasonNum.coerceAtLeast(1)}",
+                positionMs = positionMs,
+                durationMs = durationMs,
+                serverName = server?.name ?: "",
+                serverUrl = server?.url ?: ""
+            )
+        )
+    }
+
+    fun openEpisodeServer(
+        episode: M3uChannel,
+        server: M3uServer,
+        saveRecent: Boolean = true,
+        isForCast: Boolean = false
+    ) {
+        currentEpTitle = episode.title
+
+        if (saveRecent && !isForCast) {
+            val last = M3uWatchHistoryStore.getEntry(episode.url, M3uWatchType.SERIES)
+            saveEpisodeHistory(
+                episode = episode,
+                server = server,
+                positionMs = last?.positionMs ?: 0L,
+                durationMs = last?.durationMs ?: 0L
+            )
+        }
+
+        scope.launch {
+            if (isForCast) isExtractingCast = true else isExtractingPlay = true
+
+            val resolvedUrl = if (WorkerResolver.isWorkerUrl(server.url)) {
+                Log.d("SERIES_DETAIL", "🔍 Resolviendo worker en episodio: ${server.url}")
+                WorkerResolver.resolveIfWorker(server.url, isSeries = true, context = context) ?: server.url
+            } else {
+                server.url
+            }
+
+            val result = withContext(Dispatchers.IO) {
+                VideoExtractor.resolve(context, resolvedUrl)
+            }
+
+            val finalReferer = if (result.targetUrl?.contains("dailymotion", ignoreCase = true) == true ||
+                server.url.contains("dailymotion", ignoreCase = true)) {
+                Log.d("SERIES_DAILYMOTION", "Forzando referer Dailymotion: https://geo.dailymotion.com/")
+                "https://geo.dailymotion.com/"
+            } else {
+                result.referer
+            }
+
+            if (isForCast) {
+                if (result.playerType == 3) {
+                    Toast.makeText(context, "Este servidor no permite Cast directo.", Toast.LENGTH_LONG).show()
+                } else {
+                    castStreamUrl = result.targetUrl
+                    castReferer = finalReferer
+                    castCookies = result.cookies
+                    showCastDialog = true
+                }
+                isExtractingCast = false
+            } else {
+                currentStreamUrl = result.targetUrl
+                currentReferer = finalReferer
+                currentRefererFallback = null
+                isSilentMode = result.isSilentMode
+                activePlayerType = result.playerType
+                preExtractedCookies = result.cookies
+
+                CookieManager.getInstance().flush()
+                playerKey = server.url
+                isExtractingPlay = false
+            }
+        }
+    }
+
+    val forceNextServer = {
+        val currentIndex = selectedServer?.let { servers.indexOf(it) } ?: -1
+        if (currentIndex in 0 until servers.lastIndex) {
+            Log.w("VOD_EXTRACT", "⚠️ Forzando cambio al siguiente servidor (${currentIndex + 2}/${servers.size})")
+            retryCount = 0
+            selectedServer = servers[currentIndex + 1]
+            currentStreamUrl = null
+            playerKey = null
+            isSilentMode = false
+            VodPlayerHolder.player?.release()
+            VodPlayerHolder.player = null
+
+            CoroutineScope(Dispatchers.Main).launch {
+                delay(150)
+                selectedEpisode?.let { ep ->
+                    selectedServer?.let { srv ->
+                        openEpisodeServer(ep, srv, saveRecent = false)
+                    }
+                }
+            }
+        } else {
+            Log.e("VOD_EXTRACT", "❌ No hay más servidores disponibles")
+            showNoServersOverlay = true
+            playerKey = null
+            PlayerUiState.isFullscreen = false
+            restoreRequestedOrientation()
+        }
+    }
+
+    val triggerServerFallback = {
+        if (retryCount < 3) {
+            retryCount++
+            Toast.makeText(context, "Reintentando... ($retryCount/3)", Toast.LENGTH_SHORT).show()
+            val tempUrl = currentStreamUrl
+            currentStreamUrl = null
+            playerKey = null
+
+            scope.launch {
+                delay(800)
+                currentStreamUrl = tempUrl
+                playerKey = tempUrl
+            }
+        } else {
+            // ✅ REPORTAR FALLO FINAL ANTES DE CAMBIAR DE SERVIDOR
+            val epUrl = selectedEpisode?.url ?: ""
+            val srvUrl = selectedServer?.url ?: ""
+            if (epUrl.isNotBlank() && srvUrl.isNotBlank()) {
+                SupabaseFailReporter.reportCanalFail(context, epUrl, srvUrl)
+            }
+            forceNextServer()
+        }
+    }
+
+    LaunchedEffect(seriesName) {
+        currentStreamUrl = null
+        currentEpTitle = ""
+        playerKey = null
+        currentReferer = null
+        currentRefererFallback = null
+        isSilentMode = false
+        isExtractingPlay = false
+        isExtractingCast = false
+        showCastDialog = false
+        castStreamUrl = null
+        castReferer = null
+        castCookies = ""
+        retryCount = 0
+        showServerDeadOverlay = false
+        showNoServersOverlay = false
+        serverDeadMessageText = ""
+
+        VodPlayerHolder.player?.release()
+        VodPlayerHolder.player = null
+        PlayerUiState.isFullscreen = false
+
+        WebStorage.getInstance().deleteAllData()
+        CookieManager.getInstance().removeAllCookies(null)
+        CookieManager.getInstance().flush()
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            VodPlayerHolder.player?.release()
+            VodPlayerHolder.player = null
+            PlayerUiState.isFullscreen = false
+        }
+    }
+
+    fun requestEpisodeListFocus() {
+        val episode = selectedEpisode
+        val episodes = groupedBySeason[selectedSeasonName].orEmpty()
+        val index = episodes.indexOfFirst { episode != null && episodeFocusKey(it) == episodeFocusKey(episode) }
+        if (episode == null || index < 0) {
+            scope.launch {
+                delay(250)
+                runCatching { playFocusRequester.requestFocus() }
+            }
+            return
+        }
+        focusEpisodeAt(index)
+    }
+
+    fun leaveFullscreenAndKeepPlayback() {
+        PlayerUiState.isFullscreen = false
+        restoreRequestedOrientation()
+        activity?.showSystemBarsCompatExo()
+        scope.launch {
+            delay(250)
+            requestEpisodeListFocus()
+        }
+    }
+
+    fun stopPlaybackAndReturnToEpisodes() {
+        selectedEpisode?.let { episode ->
+            val savedProgress = M3uWatchHistoryStore.getEntry(episode.url, M3uWatchType.SERIES)
+            saveEpisodeHistory(
+                episode = episode,
+                server = selectedServer,
+                positionMs = VodPlayerHolder.player?.currentPosition ?: savedProgress?.positionMs ?: 0L,
+                durationMs = VodPlayerHolder.player?.duration ?: savedProgress?.durationMs ?: 0L
+            )
+        }
+        PlayerUiState.isFullscreen = false
+        restoreRequestedOrientation()
+        activity?.showSystemBarsCompatExo()
+        currentStreamUrl = null
+        playerKey = null
+        isExtractingPlay = false
+        VodPlayerHolder.player?.release()
+        VodPlayerHolder.player = null
+        scope.launch {
+            delay(250)
+            requestEpisodeListFocus()
+        }
+    }
+
+    val isFullscreen = PlayerUiState.isFullscreen
+
+    BackHandler(enabled = true) {
+        if (isFullscreen && !isTvDevice) {
+            leaveFullscreenAndKeepPlayback()
+        } else if (playerKey != null) {
+            stopPlaybackAndReturnToEpisodes()
+        } else {
+            onBack()
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+    ) {
+        if (!isFullscreen) {
+            IconButton(
+                onClick = { onBack() },
+                modifier = Modifier
+                    .focusProperties { down = playFocusRequester }
+                    .focusRequester(backFocusRequester)
+                    .align(Alignment.TopStart)
+                    .padding(16.dp)
+                    .zIndex(10f)
+                    .background(Color.Black.copy(alpha = 0.5f), CircleShape)
+            ) {
+                Icon(
+                    Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "Atrás",
+                    tint = Color.White,
+                    modifier = Modifier.size(28.dp)
+                )
+            }
+        }
+
+        if (!isFullscreen) {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize()
+            ) {
+                item {
+                    var bannerHasFocus by remember { mutableStateOf(false) }
+                    var playButtonHasFocus by remember(seriesName) { mutableStateOf(false) }
+                    var myListButtonHasFocus by remember(seriesName) { mutableStateOf(false) }
+                    var synopsisButtonHasFocus by remember(seriesName) { mutableStateOf(false) }
+                    val myListButtonColor by animateColorAsState(
+                        targetValue = if (isInMyList) Color(0xFF2E6B4F) else Color(0xFF414A56),
+                        animationSpec = tween(durationMillis = 220),
+                        label = "series_my_list_color"
+                    )
+                    val screenConfiguration = LocalConfiguration.current
+                    val screenWidthDp = screenConfiguration.screenWidthDp
+                    val screenHeightDp = screenConfiguration.screenHeightDp
+                    val isLargeScreen = isTvDevice || screenWidthDp >= 600   // 📺 TV o 💻 tablet
+                    val openEpisodeFullscreen: () -> Unit = {
+                        if (selectedServer != null && selectedEpisode != null) {
+                            if (isLargeScreen) {
+                                PlayerUiState.isFullscreen = true
+                                activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                                activity?.hideSystemBarsCompatExo()
+                            }
+                            openEpisodeServer(
+                                episode = selectedEpisode!!,
+                                server = selectedServer!!,
+                                saveRecent = true
+                            )
+                        }
+                    }
+
+// 📺 En TV el foco inicial cae directamente en el botón Reproducir.
+                    LaunchedEffect(isTvDevice, seriesName) {
+                        if (isTvDevice && !initialTvPlayFocusRequested) {
+                            delay(300)
+                            runCatching { playFocusRequester.requestFocus() }
+                            initialTvPlayFocusRequested = true
+                        }
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .then(
+                                if (isTvDevice) {
+                                    Modifier.height((screenHeightDp * 0.52f).coerceIn(300f, 420f).dp)
+                                } else {
+                                    Modifier.aspectRatio(16f / 9f)
+                                }
+                            )
+                            // En teléfono/tablet se conserva el comportamiento anterior del banner.
+                            .then(
+                                if (isTvDevice) Modifier else Modifier
+                                    .scale(if (bannerHasFocus) 1.02f else 1f)
+                                    .zIndex(if (bannerHasFocus) 1f else 0f)
+                                    .onFocusChanged { bannerHasFocus = it.hasFocus }
+                                    .clickable(enabled = playerKey == null) { openEpisodeFullscreen() }
+                            )
+                            .border(
+                                width = if (!isTvDevice && bannerHasFocus) 4.dp else 0.dp,
+                                color = if (!isTvDevice && bannerHasFocus) Color.White else Color.Transparent,
+                                shape = RoundedCornerShape(if (isTvDevice) 16.dp else 12.dp)
+                            )
+                            .background(Color(0xFF101826))
+                    ) {
+                        if (playerKey == null) {
+                            val backdrop = tmdbInfo?.backdropPath?.takeIf { it.isNotEmpty() }
+                                ?.let { "https://image.tmdb.org/t/p/${if (isTvDevice) "original" else "w1280"}$it" }
+                                ?: selectedEpisode?.logo
+                                ?: ""
+                            if (backdrop.isNotEmpty()) {
+                                val coverRequest = remember(backdrop, isTvDevice, seriesName) {
+                                    ImageRequest.Builder(context)
+                                        .data(backdrop)
+                                        .size(if (isTvDevice) 1920 else 1280)
+                                        .memoryCacheKey("${seriesName}_$backdrop")
+                                        .crossfade(true)
+                                        .build()
+                                }
+                                AsyncImage(
+                                    model = coverRequest,
+                                    contentDescription = null,
+                                    contentScale = ContentScale.Crop,
+                                    alignment = Alignment.TopCenter,
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                            } else {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .background(Color(0xFF101826)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text("SERIES", color = Color.White.copy(alpha = 0.4f))
+                                }
+                            }
+                            Box(
+                                Modifier
+                                    .fillMaxSize()
+                                    .background(
+                                        if (isTvDevice) {
+                                            Brush.verticalGradient(
+                                                colorStops = arrayOf(
+                                                    0f to Color.Transparent,
+                                                    0.34f to Color.Transparent,
+                                                    0.56f to Color.Black.copy(alpha = 0.18f),
+                                                    0.78f to Color.Black.copy(alpha = 0.62f),
+                                                    1f to Color.Black.copy(alpha = 0.96f)
+                                                )
+                                            )
+                                        } else {
+                                            Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(0.85f)))
+                                        }
+                                    )
+                            )
+                            if (isTvDevice) {
+                                Box(
+                                    Modifier
+                                        .fillMaxSize()
+                                        .background(
+                                            Brush.horizontalGradient(
+                                                listOf(Color.Black.copy(alpha = 0.72f), Color.Black.copy(alpha = 0.22f), Color.Transparent)
+                                            )
+                                        )
+                                )
+                                Column(
+                                    modifier = Modifier
+                                        .align(Alignment.BottomStart)
+                                        .padding(start = 32.dp, end = 32.dp, bottom = 24.dp),
+                                    horizontalAlignment = Alignment.Start
+                                ) {
+                                    Text(
+                                        text = seriesName,
+                                        color = Color.White,
+                                        fontSize = 28.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Spacer(Modifier.height(4.dp))
+                                    Text(
+                                        text = "T${selectedEpisode?.seasonNum ?: 1} · E${selectedEpisode?.episodeNum ?: 1}  ${selectedEpisode?.title.orEmpty()}",
+                                        color = Color.White.copy(alpha = 0.88f),
+                                        fontSize = 14.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    val episodeTags = listOfNotNull(
+                                        selectedEpisode?.language?.takeIf { it.isNotBlank() },
+                                        selectedEpisode?.quality?.takeIf { it.isNotBlank() }
+                                    )
+                                    if (episodeTags.isNotEmpty()) {
+                                        Spacer(Modifier.height(6.dp))
+                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                            episodeTags.forEach { tag ->
+                                                Text(
+                                                    text = tag,
+                                                    color = Color.White.copy(alpha = 0.9f),
+                                                    fontSize = 10.sp,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    modifier = Modifier
+                                                        .background(Color.White.copy(alpha = 0.16f), RoundedCornerShape(4.dp))
+                                                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                                                )
+                                            }
+                                        }
+                                    }
+                                    if (seriesSynopsis.isNotBlank()) {
+                                        Spacer(Modifier.height(8.dp))
+                                        Text(
+                                            text = seriesSynopsis,
+                                            color = Color.White.copy(alpha = 0.94f),
+                                            fontSize = 14.sp,
+                                            lineHeight = 19.sp,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.fillMaxWidth(0.72f)
+                                        )
+                                    }
+                                    Spacer(Modifier.height(12.dp))
+                                    Row(
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Button(
+                                            onClick = { if (!isExtractingPlay) openEpisodeFullscreen() },
+                                            modifier = Modifier
+                                                .focusProperties {
+                                                    up = backFocusRequester
+                                                    if (isTvDevice) down = serverSelectorFocusRequester
+                                                }
+                                                .focusRequester(playFocusRequester)
+                                                .onFocusChanged { playButtonHasFocus = it.isFocused }
+                                                .border(
+                                                    width = if (isTvDevice && playButtonHasFocus) 1.5.dp else 0.dp,
+                                                    color = if (isTvDevice && playButtonHasFocus) {
+                                                        Color.White.copy(alpha = 0.9f)
+                                                    } else {
+                                                        Color.Transparent
+                                                    },
+                                                    shape = RoundedCornerShape(8.dp)
+                                                )
+                                                .zIndex(if (playButtonHasFocus) 1f else 0f),
+                                            shape = RoundedCornerShape(8.dp),
+                                            contentPadding = PaddingValues(horizontal = 18.dp, vertical = 10.dp),
+                                            colors = ButtonDefaults.buttonColors(
+                                                containerColor = if (resumePositionMs > 0L) Color(0xFFE50914) else Color.White,
+                                                contentColor = if (resumePositionMs > 0L) Color.White else Color.Black
+                                            )
+                                        ) {
+                                            if (isExtractingPlay) {
+                                                CircularProgressIndicator(
+                                                    color = if (resumePositionMs > 0L) Color.White else Color.Black,
+                                                    modifier = Modifier.size(22.dp),
+                                                    strokeWidth = 2.dp
+                                                )
+                                            } else {
+                                                Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(24.dp))
+                                            }
+                                            Spacer(Modifier.width(8.dp))
+                                            Text(
+                                                text = when {
+                                                    isExtractingPlay -> "Conectando…"
+                                                    resumePositionMs > 0L -> "Reanudar"
+                                                    else -> "Reproducir episodio"
+                                                },
+                                                fontSize = 16.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        }
+                                        Button(
+                                            onClick = {
+                                                isInMyList = M3uMyListStore.toggle(
+                                                    context,
+                                                    M3uMyListEntry(
+                                                        mediaType = M3uMyListEntry.SERIES,
+                                                        mediaId = seriesName,
+                                                        title = seriesName,
+                                                        logo = selectedEpisode?.logo.orEmpty(),
+                                                        year = selectedEpisode?.year.orEmpty(),
+                                                        language = selectedEpisode?.language.orEmpty(),
+                                                        quality = selectedEpisode?.quality.orEmpty()
+                                                    )
+                                                )
+                                                onMyListChanged()
+                                            },
+                                            modifier = Modifier
+                                                .onFocusChanged { myListButtonHasFocus = it.isFocused }
+                                                .border(
+                                                    width = if (isTvDevice && myListButtonHasFocus) 1.5.dp else 0.dp,
+                                                    color = if (isTvDevice && myListButtonHasFocus) {
+                                                        Color.White.copy(alpha = 0.9f)
+                                                    } else {
+                                                        Color.Transparent
+                                                    },
+                                                    shape = RoundedCornerShape(8.dp)
+                                                )
+                                                .zIndex(if (myListButtonHasFocus) 1f else 0f),
+                                            shape = RoundedCornerShape(8.dp),
+                                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
+                                            colors = ButtonDefaults.buttonColors(containerColor = myListButtonColor, contentColor = Color.White)
+                                        ) {
+                                            Icon(if (isInMyList) Icons.Default.Check else Icons.Default.Add, contentDescription = null, modifier = Modifier.size(20.dp))
+                                            Spacer(Modifier.width(6.dp))
+                                            Text(if (isInMyList) "En Mi lista" else "Mi lista", fontWeight = FontWeight.SemiBold)
+                                        }
+                                        if (seriesSynopsis.isNotBlank()) {
+                                            TextButton(
+                                                onClick = { showFullSynopsis = true },
+                                                modifier = Modifier
+                                                    .onFocusChanged { synopsisButtonHasFocus = it.isFocused }
+                                                    .border(
+                                                        width = if (isTvDevice && synopsisButtonHasFocus) 1.5.dp else 0.dp,
+                                                        color = if (isTvDevice && synopsisButtonHasFocus) {
+                                                            Color.White.copy(alpha = 0.9f)
+                                                        } else {
+                                                            Color.Transparent
+                                                        },
+                                                        shape = RoundedCornerShape(8.dp)
+                                                    )
+                                                    .zIndex(if (synopsisButtonHasFocus) 1f else 0f),
+                                                colors = ButtonDefaults.textButtonColors(contentColor = Color.White)
+                                            ) {
+                                                Text("Ver sinopsis completa", fontWeight = FontWeight.SemiBold)
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                Column(
+                                    modifier = Modifier.align(Alignment.Center),
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(72.dp)
+                                            .animatedCircleGlow(isActive = bannerHasFocus && resumePositionMs <= 0L && !isTvDevice, color1 = Color(0xFFFF4500), color2 = Color(0xFFFFD700))
+                                            .clip(CircleShape)
+                                            .background(
+                                                Brush.radialGradient(
+                                                    colors = if (resumePositionMs > 0L) {
+                                                        listOf(Color(0xFFE50914), Color(0xFFB20710))
+                                                    } else {
+                                                        listOf(Color(0xFFFFD700), Color(0xFFFF4500))
+                                                    }
+                                                )
+                                            ),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        if (isExtractingPlay) {
+                                            CircularProgressIndicator(
+                                                color = Color.White,
+                                                modifier = Modifier.size(32.dp),
+                                                strokeWidth = 3.dp
+                                            )
+                                        } else {
+                                            Icon(
+                                                Icons.Default.PlayArrow,
+                                                contentDescription = "Reproducir",
+                                                tint = Color.White,
+                                                modifier = Modifier.size(40.dp)
+                                            )
+                                        }
+                                    }
+                                    Spacer(Modifier.height(10.dp))
+                                    Text(
+                                        text = if (resumePositionMs > 0L) "REANUDAR" else "VER EPISODIO",
+                                        color = Color.White,
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        letterSpacing = 1.5.sp
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp)
+                    ) {
+                        var serverSelectorHasFocus by remember { mutableStateOf(false) }
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(52.dp)
+                                .zIndex(if (serverSelectorHasFocus) 1f else 0f)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(Brush.horizontalGradient(listOf(Color(0xFF1E2A3A), Color(0xFF111827))))
+                                .border(
+                                    width = if (isTvDevice && serverSelectorHasFocus) 1.5.dp else 1.dp,
+                                    color = if (isTvDevice && serverSelectorHasFocus) {
+                                        Color.White.copy(alpha = 0.9f)
+                                    } else {
+                                        Color(0xFF3B82F6).copy(alpha = 0.5f)
+                                    },
+                                    shape = RoundedCornerShape(12.dp)
+                                )
+                                .focusRequester(serverSelectorFocusRequester)
+                                .focusProperties {
+                                    if (isTvDevice) {
+                                        up = playFocusRequester
+                                        down = if (seasonNames.isNotEmpty()) seasonSelectorFocusRequester else firstEpisodeFocusRequester
+                                    }
+                                }
+                                .onKeyEvent { event ->
+                                    if (isTvDevice && event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) {
+                                        if (seasonNames.isNotEmpty()) {
+                                            runCatching { seasonSelectorFocusRequester.requestFocus() }
+                                        } else {
+                                            focusEpisodeAt(0)
+                                        }
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                }
+                                .onFocusChanged { serverSelectorHasFocus = it.isFocused }
+                                .clickable(
+                                    interactionSource = remember { MutableInteractionSource() },
+                                    indication = null,
+                                    enabled = servers.isNotEmpty(),
+                                    onClick = { expandedServers = true }
+                                )
+                                .padding(horizontal = 16.dp),
+                            contentAlignment = Alignment.CenterStart
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Icon(
+                                    Icons.Rounded.Dns,
+                                    null,
+                                    tint = Color(0xFF3B82F6),
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(Modifier.width(10.dp))
+
+                                val currentServer = selectedServer
+                                val lang = if (!currentServer?.language.isNullOrBlank()) {
+                                    " (${currentServer?.language})"
+                                } else ""
+
+                                Text(
+                                    text = if (currentServer != null) {
+                                        "Servidor ${servers.indexOf(currentServer) + 1}: ${currentServer.name}$lang"
+                                    } else {
+                                        "Sin servidores"
+                                    },
+                                    color = Color.White,
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Text("▼", color = Color.Gray, fontSize = 12.sp)
+                            }
+                        }
+
+                        DropdownMenu(
+                            expanded = expandedServers,
+                            onDismissRequest = { expandedServers = false },
+                            modifier = Modifier
+                                .background(Color(0xFF1E2A3A))
+                                .fillMaxWidth(0.9f)
+                        ) {
+                            servers.forEachIndexed { index, srv ->
+                                val lang = if (!srv.language.isNullOrBlank()) " (${srv.language})" else ""
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            "Servidor ${index + 1}: ${srv.name}$lang",
+                                            color = if (srv == selectedServer) Color(0xFF3B82F6) else Color.White
+                                        )
+                                    },
+                                    onClick = {
+                                        if (srv != selectedServer) {
+                                            selectedServer = srv
+                                            expandedServers = false
+                                            retryCount = 0
+
+                                            if (playerKey != null && selectedEpisode != null) {
+                                                currentStreamUrl = null
+                                                playerKey = null
+                                                isSilentMode = false
+                                                VodPlayerHolder.player?.release()
+                                                VodPlayerHolder.player = null
+
+                                                CoroutineScope(Dispatchers.Main).launch {
+                                                    delay(150)
+                                                    openEpisodeServer(
+                                                        episode = selectedEpisode!!,
+                                                        server = srv,
+                                                        saveRecent = false
+                                                    )
+                                                }
+                                            } else {
+                                                expandedServers = false
+                                            }
+                                        } else {
+                                            expandedServers = false
+                                        }
+                                    }
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(Modifier.height(16.dp))
+
+                    if (!isTvDevice) {
+                        Text(
+                            text = seriesName,
+                            color = Color.White,
+                            fontSize = 24.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 16.dp)
+                        )
+
+                        Spacer(Modifier.height(4.dp))
+
+                        Text(
+                            text = "Estás viendo: ${selectedEpisode?.title ?: ""}",
+                            color = Color(0xFFCFD8DC),
+                            fontSize = 14.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(horizontal = 16.dp)
+                        )
+
+                        Spacer(Modifier.height(8.dp))
+                    }
+
+                    if (!isTvDevice) {
+                        val mobileMyListColor by animateColorAsState(
+                            targetValue = if (isInMyList) Color(0xFF2E6B4F) else Color(0xFF414A56),
+                            animationSpec = tween(durationMillis = 220),
+                            label = "series_mobile_my_list_color"
+                        )
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                selectedEpisode?.language?.takeIf { it.isNotBlank() }?.let {
+                                    AssistChip(onClick = {}, label = { Text(it, fontSize = 10.sp) })
+                                }
+                                selectedEpisode?.quality?.takeIf { it.isNotBlank() }?.let {
+                                    AssistChip(onClick = {}, label = { Text(it, fontSize = 10.sp) })
+                                }
+                            }
+                            Spacer(Modifier.weight(1f))
+                            TextButton(
+                                onClick = {
+                                    isInMyList = M3uMyListStore.toggle(
+                                        context,
+                                        M3uMyListEntry(
+                                            mediaType = M3uMyListEntry.SERIES,
+                                            mediaId = seriesName,
+                                            title = seriesName,
+                                            logo = selectedEpisode?.logo.orEmpty(),
+                                            year = selectedEpisode?.year.orEmpty(),
+                                            language = selectedEpisode?.language.orEmpty(),
+                                            quality = selectedEpisode?.quality.orEmpty()
+                                        )
+                                    )
+                                    onMyListChanged()
+                                },
+                                colors = ButtonDefaults.textButtonColors(contentColor = mobileMyListColor),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                            ) {
+                                Icon(if (isInMyList) Icons.Default.Check else Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text(if (isInMyList) "En Mi lista" else "Mi lista", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                            }
+                            Spacer(Modifier.width(8.dp))
+                            val isWifi = isWifiConnected(context)
+                            IconButton(
+                                onClick = {
+                                    if (currentStreamUrl != null && playerKey != null) {
+                                        castStreamUrl = currentStreamUrl
+                                        castReferer = currentReferer
+                                        castCookies = preExtractedCookies
+                                        showCastDialog = true
+                                    } else {
+                                        if (selectedServer != null && selectedEpisode != null) {
+                                            openEpisodeServer(
+                                                episode = selectedEpisode!!,
+                                                server = selectedServer!!,
+                                                saveRecent = false,
+                                                isForCast = true
+                                            )
+                                        }
+                                    }
+                                },
+                                enabled = !isExtractingCast && isWifi,
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .background(Color(0xFF1E2A3A), CircleShape)
+                            ) {
+                                if (isExtractingCast) {
+                                    CircularProgressIndicator(color = Color.White, modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                                } else {
+                                    Icon(Icons.Default.CastConnected, contentDescription = "Transmitir a TV", tint = Color.White, modifier = Modifier.size(22.dp))
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(Modifier.height(16.dp))
+                    val sinopsis = seriesSynopsis
+                    if (!isTvDevice && (sinopsis.isNotBlank() || !selectedEpisode?.logo.isNullOrBlank())) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 16.dp),
+                            verticalAlignment = Alignment.Top
+                        ) {
+                            val posterUrl = selectedEpisode?.logo ?: tmdbInfo?.posterPath?.takeIf { it.isNotEmpty() }?.let { "https://image.tmdb.org/t/p/w342$it" } ?: ""
+                            if (posterUrl.isNotEmpty()) {
+                                val posterRequest = remember(posterUrl) {
+                                    ImageRequest.Builder(context)
+                                        .data(posterUrl)
+                                        .size(150)
+                                        .memoryCacheKey(posterUrl)
+                                        .crossfade(false)
+                                        .build()
+                                }
+                                AsyncImage(
+                                    model = posterRequest,
+                                    contentDescription = null,
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier
+                                        .size(90.dp, 130.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                )
+                                Spacer(Modifier.width(12.dp))
+                            }
+                            if (sinopsis.isNotBlank()) {
+                                var synopsisTruncated by remember(seriesName, sinopsis) { mutableStateOf(false) }
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = sinopsis,
+                                        color = Color(0xFFB0BEC5),
+                                        fontSize = 14.sp,
+                                        lineHeight = 22.sp,
+                                        maxLines = 4,
+                                        overflow = TextOverflow.Ellipsis,
+                                        onTextLayout = { synopsisTruncated = it.hasVisualOverflow }
+                                    )
+                                    if (synopsisTruncated) {
+                                        TextButton(
+                                            onClick = { showFullSynopsis = true },
+                                            contentPadding = PaddingValues(horizontal = 0.dp, vertical = 2.dp)
+                                        ) {
+                                            Text("Ver completo", color = Color(0xFF60A5FA), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Spacer(Modifier.height(16.dp))
+                    }
+
+                    Spacer(Modifier.height(18.dp))
+
+                    if (seasonNames.isNotEmpty()) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp)
+                        ) {
+                            Text(
+                                text = "Temporadas",
+                                color = Color.White,
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.padding(bottom = 8.dp)
+                            )
+
+                            var menuExpanded by remember { mutableStateOf(false) }
+                            val selectedText = remember(selectedSeasonName, episodesCountBySeason) {
+                                val count = episodesCountBySeason[selectedSeasonName] ?: 0
+                                "$selectedSeasonName - $count cap"
+                            }
+
+                            var seasonSelectorHasFocus by remember { mutableStateOf(false) }
+                            val seasonSelectorScale by animateFloatAsState(
+                                targetValue = if (isTvDevice && seasonSelectorHasFocus) 1.03f else 1f,
+                                animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+                                label = "series_season_selector_focus_scale"
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(52.dp)
+                                    .graphicsLayer { scaleX = seasonSelectorScale; scaleY = seasonSelectorScale }
+                                    .zIndex(if (seasonSelectorHasFocus) 1f else 0f)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(Color(0xFF1E2A3A))
+                                    .border(
+                                        width = if (isTvDevice && seasonSelectorHasFocus) 2.dp else 1.dp,
+                                        color = if (isTvDevice && seasonSelectorHasFocus) Color.White else Color(0xFF3B82F6).copy(alpha = 0.5f),
+                                        shape = RoundedCornerShape(12.dp)
+                                    )
+                                    .focusRequester(seasonSelectorFocusRequester)
+                                    .focusProperties {
+                                        if (isTvDevice) {
+                                            up = serverSelectorFocusRequester
+                                            down = firstEpisodeFocusRequester
+                                        }
+                                    }
+                                    .onKeyEvent { event ->
+                                        if (isTvDevice && event.type == KeyEventType.KeyDown &&
+                                            event.key == Key.DirectionDown &&
+                                            groupedBySeason[selectedSeasonName].orEmpty().isNotEmpty()
+                                        ) {
+                                            focusEpisodeAt(0)
+                                            true
+                                        } else {
+                                            false
+                                        }
+                                    }
+                                    .onFocusChanged { seasonSelectorHasFocus = it.isFocused }
+                                    .clickable(
+                                        interactionSource = remember { MutableInteractionSource() },
+                                        indication = null,
+                                        onClick = { menuExpanded = true }
+                                    )
+                                    .padding(horizontal = 16.dp),
+                                contentAlignment = Alignment.CenterStart
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(
+                                        text = selectedText,
+                                        color = Color.White,
+                                        fontSize = 15.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    Icon(
+                                        Icons.Default.KeyboardArrowDown,
+                                        contentDescription = "Abrir temporadas",
+                                        tint = Color(0xFF3B82F6),
+                                        modifier = Modifier.size(24.dp)
+                                    )
+                                }
+                            }
+
+                            DropdownMenu(
+                                expanded = menuExpanded,
+                                onDismissRequest = { menuExpanded = false },
+                                modifier = Modifier
+                                    .background(Color(0xFF1E2A3A))
+                                    .fillMaxWidth(0.9f)
+                            ) {
+                                seasonNames.forEach { season ->
+                                    val count = episodesCountBySeason[season] ?: 0
+                                    val display = "$season - $count cap"
+                                    DropdownMenuItem(
+                                        text = {
+                                            Text(
+                                                display,
+                                                color = if (season == selectedSeasonName) Color(0xFF3B82F6) else Color.White,
+                                                fontWeight = if (season == selectedSeasonName) FontWeight.Bold else FontWeight.Normal
+                                            )
+                                        },
+                                        onClick = {
+                                            selectedSeasonName = season
+                                            menuExpanded = false
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(Modifier.height(16.dp))
+
+                    Text(
+                        text = "Episodios",
+                        color = Color.White,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 16.dp)
+                    )
+
+                    Spacer(Modifier.height(12.dp))
+                }
+
+                val episodesOfSelectedSeason = groupedBySeason[selectedSeasonName] ?: emptyList()
+
+                items(episodesOfSelectedSeason, key = { episode -> "${episode.url}_${episode.seasonNum}_${episode.episodeNum}" }, contentType = { "episode_item" }) { episode ->
+                    val episodeIndex = episodesOfSelectedSeason.indexOfFirst {
+                        episodeFocusKey(it) == episodeFocusKey(episode)
+                    }
+                    val episodeRequester = if (episodeIndex == 0) {
+                        firstEpisodeFocusRequester
+                    } else {
+                        episodeFocusRequesters.getOrPut(episodeFocusKey(episode)) { FocusRequester() }
+                    }
+                    EpisodeItem(
+                        episode = episode,
+                        isSelected = selectedEpisode?.url == episode.url,
+                        listId = listId,
+                        focusRequester = episodeRequester,
+                        onMoveUp = {
+                            if (episodeIndex > 0) {
+                                focusEpisodeAt(episodeIndex - 1)
+                            } else if (seasonNames.isNotEmpty()) {
+                                runCatching { seasonSelectorFocusRequester.requestFocus() }
+                            } else {
+                                runCatching { serverSelectorFocusRequester.requestFocus() }
+                            }
+                        },
+                        onMoveDown = {
+                            if (episodeIndex >= 0 && episodeIndex < episodesOfSelectedSeason.lastIndex) {
+                                focusEpisodeAt(episodeIndex + 1)
+                            }
+                        },
+                        onClick = {
+                            selectedEpisode = episode
+                            selectedServer = episode.servers.ifEmpty {
+                                listOf(M3uServer("Servidor Único", episode.url, episode.isEmbed, episode.language))
+                            }.firstOrNull()
+
+                            if (playerKey != null) {
+                                val srv = selectedServer ?: M3uServer(
+                                    "Servidor",
+                                    episode.url,
+                                    episode.isEmbed,
+                                    episode.language
+                                )
+
+                                currentEpTitle = episode.title
+                                currentStreamUrl = null
+                                playerKey = null
+                                VodPlayerHolder.player?.release()
+                                VodPlayerHolder.player = null
+
+                                scope.launch {
+                                    delay(100)
+                                    openEpisodeServer(
+                                        episode = episode,
+                                        server = srv,
+                                        saveRecent = true
+                                    )
+                                }
+                            }
+                        }
+                    )
+                }
+
+                item {
+                    Spacer(Modifier.height(32.dp))
+                }
+            }
+        }
+
+        if (showFullSynopsis && seriesSynopsis.isNotBlank()) {
+            AlertDialog(
+                onDismissRequest = { showFullSynopsis = false },
+                title = { Text("Sinopsis completa", fontWeight = FontWeight.Bold) },
+                text = {
+                    Text(
+                        text = seriesSynopsis,
+                        color = Color(0xFFCFD8DC),
+                        modifier = Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState())
+                    )
+                },
+                confirmButton = { TextButton(onClick = { showFullSynopsis = false }) { Text("Cerrar") } },
+                containerColor = Color(0xFF1E2A3A),
+                titleContentColor = Color.White,
+                textContentColor = Color(0xFFCFD8DC)
+            )
+        }
+
+        if (showCastDialog && castStreamUrl != null) {
+            AlertDialog(
+                onDismissRequest = { showCastDialog = false },
+                title = { Text("Transmisión Lista", fontWeight = FontWeight.Bold) },
+                text = { Text("El video ha sido extraído correctamente. ¿Deseas abrir Web Video Caster para enviarlo a tu TV?") },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            showCastDialog = false
+                            ExternalCaster.castViaWebcaster(
+                                context = context,
+                                videoUrl = castStreamUrl!!,
+                                title = currentEpTitle.ifEmpty { selectedEpisode?.title ?: "" },
+                                referer = castReferer,
+                                cookies = castCookies
+                            )
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF3B82F6))
+                    ) { Text("Aceptar", color = Color.White, fontWeight = FontWeight.Bold) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showCastDialog = false }) { Text("Cancelar", color = Color.LightGray) }
+                },
+                containerColor = Color(0xFF1E2A3A),
+                titleContentColor = Color.White,
+                textContentColor = Color(0xFFCFD8DC)
+            )
+        }
+
+        if (playerKey != null && currentStreamUrl != null && selectedEpisode != null) {
+            val playerModifier = if (isFullscreen) {
+                Modifier.fillMaxSize().zIndex(100f)
+            } else {
+                Modifier.fillMaxWidth().aspectRatio(16f / 9f).align(Alignment.TopCenter).zIndex(100f)
+            }
+
+            key(playerKey) {
+                Box(modifier = playerModifier) {
+                    when (activePlayerType) {
+                        1 -> {
+                            ExoVideoPlayer(
+                                url = currentStreamUrl!!,
+                                referer = currentReferer,
+                                channelName = currentEpTitle,
+                                resumePositionMs = resumePositionMs,
+                                preExtractedCookies = preExtractedCookies,
+                                isSeries = true,
+                                episodesList = groupedBySeason[selectedSeasonName] ?: emptyList(),
+                                currentEpisodeUrl = selectedEpisode?.url ?: "",
+                                onEpisodeSelected = { episodeUrl ->
+                                    val selectedEp = sortedEpisodes.firstOrNull { it.url == episodeUrl }
+                                    if (selectedEp != null && selectedEp.url != selectedEpisode?.url) {
+                                        selectedEpisode = selectedEp
+                                        selectedServer = selectedEp.servers.ifEmpty {
+                                            listOf(M3uServer("Servidor Único", selectedEp.url, selectedEp.isEmbed, selectedEp.language))
+                                        }.firstOrNull()
+
+                                        if (selectedServer != null) {
+                                            currentEpTitle = selectedEp.title
+                                            currentStreamUrl = null
+                                            playerKey = null
+                                            isSilentMode = false
+                                            VodPlayerHolder.player?.release()
+                                            VodPlayerHolder.player = null
+
+                                            scope.launch {
+                                                delay(150)
+                                                openEpisodeServer(
+                                                    episode = selectedEp,
+                                                    server = selectedServer!!,
+                                                    saveRecent = true
+                                                )
+                                            }
+                                        }
+                                    }
+                                },
+                                originalEmbedUrl = selectedServer?.url ?: "",
+                                seriesName = seriesName,
+                                seasonNumber = selectedEpisode?.seasonNum,
+                                episodeNumber = selectedEpisode?.episodeNum,
+                                serverName = selectedServer?.name ?: "",
+                                sharedViewModel = sharedCatalogViewModel,
+                                refererFallback = currentRefererFallback ?: "",
+                                onHardHttpError = { code ->
+                                    // ✅ REPORTAR ERROR HTTP DURO EN EXOPLAYER
+                                    val epUrl = selectedEpisode?.url ?: ""
+                                    val srvUrl = selectedServer?.url ?: ""
+                                    if (epUrl.isNotBlank() && srvUrl.isNotBlank()) {
+                                        Log.w("SERIES_EMBED", "⚠️ Error HTTP duro $code en ExoPlayer. Reportando...")
+                                        SupabaseFailReporter.reportCanalFail(context, epUrl, srvUrl)
+                                    }
+                                },
+                                onProgressUpdate = { positionMs, durationMs ->
+                                    val ep = selectedEpisode ?: return@ExoVideoPlayer
+                                    M3uWatchHistoryStore.updatePosition(
+                                        contentUrl = ep.url,
+                                        watchType = M3uWatchType.SERIES,
+                                        positionMs = positionMs,
+                                        durationMs = durationMs
+                                    )
+                                },
+                                onBackClick = {
+                                    if (isFullscreen && !isTvDevice) {
+                                        leaveFullscreenAndKeepPlayback()
+                                    } else {
+                                        stopPlaybackAndReturnToEpisodes()
+                                    }
+                                },
+                                onNextEpisode = {
+                                    val currentEp = selectedEpisode ?: return@ExoVideoPlayer
+                                    val currentSeason = groupedBySeason[selectedSeasonName] ?: emptyList()
+                                    val currentIndex = currentSeason.indexOfFirst { it.url == currentEp.url }
+
+                                    if (currentIndex >= 0 && currentIndex < currentSeason.size - 1) {
+                                        val nextEp = currentSeason[currentIndex + 1]
+                                        val nextServer = nextEp.servers.ifEmpty {
+                                            listOf(M3uServer("Servidor Único", nextEp.url, nextEp.isEmbed, nextEp.language))
+                                        }.firstOrNull()
+
+                                        if (nextServer != null) {
+                                            selectedEpisode = nextEp
+                                            selectedServer = nextServer
+                                            currentEpTitle = nextEp.title
+                                            currentStreamUrl = null
+                                            playerKey = null
+                                            isSilentMode = false
+                                            VodPlayerHolder.player?.release()
+                                            VodPlayerHolder.player = null
+
+                                            scope.launch {
+                                                delay(150)
+                                                openEpisodeServer(
+                                                    episode = nextEp,
+                                                    server = nextServer,
+                                                    saveRecent = true
+                                                )
+                                            }
+                                        }
+                                    } else {
+                                        val currentSeasonIndex = seasonNames.indexOfFirst { it == selectedSeasonName }
+                                        if (currentSeasonIndex >= 0 && currentSeasonIndex < seasonNames.size - 1) {
+                                            val nextSeasonName = seasonNames[currentSeasonIndex + 1]
+                                            val nextSeasonEpisodes = groupedBySeason[nextSeasonName] ?: emptyList()
+                                            val nextEp = nextSeasonEpisodes.firstOrNull()
+                                            val nextServer = nextEp?.servers?.firstOrNull()
+
+                                            if (nextEp != null && nextServer != null) {
+                                                selectedSeasonName = nextSeasonName
+                                                selectedEpisode = nextEp
+                                                selectedServer = nextServer
+                                                currentEpTitle = nextEp.title
+                                                currentStreamUrl = null
+                                                playerKey = null
+                                                isSilentMode = false
+                                                VodPlayerHolder.player?.release()
+                                                VodPlayerHolder.player = null
+
+                                                scope.launch {
+                                                    delay(150)
+                                                    openEpisodeServer(
+                                                        episode = nextEp,
+                                                        server = nextServer,
+                                                        saveRecent = true
+                                                    )
+                                                }
+                                            }
+                                        } else {
+                                            Toast.makeText(context, "Has llegado al último capítulo", Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                }
+                            )
+                        }
+                        2 -> {
+                            AppVideoPlayer(
+                                streamUrl = currentStreamUrl,
+                                isLive = false,
+                                channelName = currentEpTitle,
+                                resumePositionMs = resumePositionMs,
+                                trackState = trackState,
+                                referer = currentReferer,
+                                onError = { triggerServerFallback() },
+                                onProgressUpdate = { positionMs, durationMs ->
+                                    val ep = selectedEpisode ?: return@AppVideoPlayer
+                                    M3uWatchHistoryStore.updatePosition(
+                                        contentUrl = ep.url,
+                                        watchType = M3uWatchType.SERIES,
+                                        positionMs = positionMs,
+                                        durationMs = durationMs
+                                    )
+                                },
+                                onBackClick = {
+                                    if (isFullscreen && !isTvDevice) {
+                                        leaveFullscreenAndKeepPlayback()
+                                    } else {
+                                        stopPlaybackAndReturnToEpisodes()
+                                    }
+                                }
+                            )
+                        }
+                        3 -> {
+                            EmbedVideoPlayer(
+                                url = currentStreamUrl!!,
+                                canalUrl = selectedEpisode?.url ?: "",
+                                isSilentMode = isSilentMode,
+                                fanartUrl = "",
+                                refererOverride = currentReferer,     // ═══ NUEVO: pasar Referer al iframe ═══
+                                onTimeoutError = {
+                                    // ✅ MOSTRAR OVERLAY Y FORZAR CAMBIO DE SERVIDOR
+                                    val srvName = selectedServer?.name ?: "desconocido"
+                                    Log.w("VOD_EXTRACT", "⚠️ Timeout o Video no encontrado en: $srvName")
+                                    serverDeadMessageText = "El servidor \"$srvName\" no está disponible.\nCambiando de fuente…"
+                                    showServerDeadOverlay = true
+                                    CoroutineScope(Dispatchers.Main).launch {
+                                        delay(1500)
+                                        showServerDeadOverlay = false
+                                        forceNextServer()
+                                    }
+                                },
+                                onEmbedUnavailable = {
+                                    Log.w("VOD_EXTRACT", "⚠️ Servidor caído detectado: ${selectedServer?.name ?: "desconocido"}")
+
+                                    val epUrl = selectedEpisode?.url ?: ""
+                                    val srvUrl = selectedServer?.url ?: ""
+                                    if (epUrl.isNotBlank() && srvUrl.isNotBlank()) {
+                                        SupabaseFailReporter.reportCanalFail(context, epUrl, srvUrl)
+                                    }
+
+                                    serverDeadMessageText = "El servidor \"${selectedServer?.name ?: "desconocido"}\" no está disponible.\nCambiando de fuente…"
+                                    showServerDeadOverlay = true
+                                    CoroutineScope(Dispatchers.Main).launch {
+                                        delay(1500)
+                                        showServerDeadOverlay = false
+                                        forceNextServer()
+                                    }
+                                },
+                                onM3u8Intercepted = { interceptedUrl, cookies ->
+                                    Log.d("SERIES_EMBED", "🔍 Validando stream: $interceptedUrl")
+
+                                    val isDoodstreamStream =
+                                        interceptedUrl.contains("token=", ignoreCase = true) && (
+                                                interceptedUrl.contains("cloudatacdn.com", ignoreCase = true) ||
+                                                        interceptedUrl.contains("dood.video", ignoreCase = true) ||
+                                                        interceptedUrl.contains("doodcdn.io", ignoreCase = true) ||
+                                                        interceptedUrl.contains("ds2play.com", ignoreCase = true)
+                                                )
+
+                                    val isIbraStream =
+                                        interceptedUrl.contains("ibra.lat", ignoreCase = true) ||
+                                                interceptedUrl.contains("cloudwindow-route.com", ignoreCase = true)
+
+                                    val isIbraMaster = isIbraStream && interceptedUrl.contains("?s=", ignoreCase = true)
+                                    val isIbraVariantM3u8 = isIbraStream && interceptedUrl.substringBefore("?").endsWith(".m3u8", ignoreCase = true)
+
+                                    val isValidStream = isIbraStream || isDoodstreamStream ||
+                                            interceptedUrl.contains("master.m3u8", ignoreCase = true) ||
+                                            interceptedUrl.contains("master.txt", ignoreCase = true) ||
+                                            interceptedUrl.contains(".urlset/", ignoreCase = true) ||
+                                            interceptedUrl.contains("hls2-c", ignoreCase = true) ||
+                                            interceptedUrl.substringBefore("?").endsWith(".m3u8", ignoreCase = true) ||
+                                            interceptedUrl.substringBefore("?").endsWith(".mp4", ignoreCase = true) ||
+                                            interceptedUrl.contains(".mp4?", ignoreCase = true) ||
+                                            interceptedUrl.contains("mxcontent.net", ignoreCase = true) ||
+                                            interceptedUrl.contains("dropcdn.io", ignoreCase = true)
+
+                                    Log.d("SERIES_EMBED", "🔍 isValidStream=$isValidStream (dood=$isDoodstreamStream, ibra=$isIbraStream, master=$isIbraMaster, variant=$isIbraVariantM3u8)")
+
+                                    if (isValidStream) {
+                                        val alreadyOnIbraMaster = currentStreamUrl?.let { it.contains("ibra.lat") && it.contains("?s=", ignoreCase = true) } == true
+                                        val shouldOverrideWithVariant = isIbraVariantM3u8 && alreadyOnIbraMaster
+
+                                        if (shouldOverrideWithVariant) {
+                                            Log.d("SERIES_EMBED", "🔁 Reemplazando master ?s= por variante .m3u8")
+                                        } else if (alreadyOnIbraMaster && isIbraMaster) {
+                                            Log.d("SERIES_EMBED", "⏭️ Ignorando master duplicado")
+                                            return@EmbedVideoPlayer
+                                        }
+
+                                        Log.d("SERIES_EMBED", "✅ Stream capturado. Cambiando a ExoPlayer: $interceptedUrl")
+                                        preExtractedCookies = cookies
+                                        isSilentMode = false
+                                        currentStreamUrl = interceptedUrl
+
+                                        sharedCatalogViewModel.cacheStreamUrl(
+                                            embedUrl = selectedServer?.url ?: "",
+                                            realUrl = interceptedUrl,
+                                            seriesName = seriesName,
+                                            seasonNumber = selectedEpisode?.seasonNum,
+                                            episodeNumber = selectedEpisode?.episodeNum,
+                                            serverName = selectedServer?.name ?: ""
+                                        )
+
+                                        if (interceptedUrl.contains("mxcontent.net", ignoreCase = true)) {
+                                            val embedOrigin = try {
+                                                val u = java.net.URI(selectedServer?.url ?: "")
+                                                if (u.scheme != null && u.host != null) "${u.scheme}://${u.host}/" else "https://mxdrop.click/"
+                                            } catch (_: Exception) { "https://mxdrop.click/" }
+                                            currentReferer = embedOrigin
+                                            currentRefererFallback = "https://miiixdrop.net/"
+                                            Log.d("SERIES_EMBED", "🎯 mxcontent.net → Referer=$embedOrigin, fallback=miiixdrop.net")
+                                        } else {
+                                            currentReferer = when {
+                                                isIbraStream -> when {
+                                                    selectedServer?.url?.contains("nupload", ignoreCase = true) == true -> "https://nupload.my/"
+                                                    currentReferer?.contains("nupload", ignoreCase = true) == true -> "https://nupload.my/"
+                                                    else -> currentReferer
+                                                }
+                                                isDoodstreamStream -> when {
+                                                    selectedServer?.url?.contains("playmogo.com", ignoreCase = true) == true -> "https://playmogo.com/"
+                                                    selectedServer?.url?.contains("doodstream.com", ignoreCase = true) == true -> "https://doodstream.com/"
+                                                    selectedServer?.url?.contains("dood.video", ignoreCase = true) == true -> "https://dood.video/"
+                                                    selectedServer?.url?.contains("ds2play.com", ignoreCase = true) == true -> "https://ds2play.com/"
+                                                    currentReferer?.contains("playmogo.com", ignoreCase = true) == true -> "https://playmogo.com/"
+                                                    currentReferer?.contains("doodstream.com", ignoreCase = true) == true -> "https://doodstream.com/"
+                                                    else -> currentReferer
+                                                }
+                                                interceptedUrl.contains("dropcdn.io", ignoreCase = true) -> "https://dr0pstream.com/"
+                                                interceptedUrl.contains("streamwish", ignoreCase = true) ||
+                                                        interceptedUrl.contains("playnixes", ignoreCase = true) ||
+                                                        interceptedUrl.contains("hgplaycdn", ignoreCase = true) -> "https://streamwish.to/"
+                                                interceptedUrl.contains("callistanise", ignoreCase = true) ||
+                                                        interceptedUrl.contains("affordablewebinars", ignoreCase = true) ||
+                                                        interceptedUrl.contains("vidhide", ignoreCase = true) -> "https://callistanise.com/"
+                                                interceptedUrl.contains("hanerix", ignoreCase = true) -> "https://hanerix.com/"
+                                                interceptedUrl.contains("sagaciousslumber.site", ignoreCase = true) -> "https://cloudorchestranova.com/"
+                                                interceptedUrl.contains("cloudorchestranova.com", ignoreCase = true) -> "https://vsembed.ru/"
+                                                else -> currentReferer
+                                            }
+                                            currentRefererFallback = null
+                                        }
+
+                                        Log.d("SERIES_EMBED", "✅ Transicionando a ExoPlayer: playerType=1, referer=$currentReferer, url=$interceptedUrl")
+                                        activePlayerType = 1
+                                    } else {
+                                        Log.w("SERIES_EMBED", "⚠️ Stream rechazado por validador: $interceptedUrl")
+                                    }
+                                },
+                                onBackClick = {
+                                    if (isFullscreen && !isTvDevice) {
+                                        leaveFullscreenAndKeepPlayback()
+                                    } else {
+                                        stopPlaybackAndReturnToEpisodes()
+                                    }
+                                }
+                            )
+                        }
+                    }
+
+                    if (showServerDeadOverlay) {
+                        Box(
+                            modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.92f)).zIndex(50f),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                modifier = Modifier.padding(32.dp)
+                            ) {
+                                Icon(Icons.Default.Warning, contentDescription = null, tint = Color(0xFFFFC107), modifier = Modifier.size(72.dp))
+                                Spacer(Modifier.height(16.dp))
+                                Text(text = serverDeadMessageText, color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
+                                Spacer(Modifier.height(24.dp))
+                                CircularProgressIndicator(color = Color(0xFFE50914))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (showNoServersOverlay) {
+            Box(
+                modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.96f)).zIndex(200f),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.padding(32.dp)
+                ) {
+                    Icon(Icons.Default.Warning, contentDescription = null, tint = Color(0xFFE50914), modifier = Modifier.size(80.dp))
+                    Spacer(Modifier.height(20.dp))
+                    Text(
+                        text = "Servidores no disponibles",
+                        color = Color.White,
+                        fontSize = 22.sp,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        text = "Por el momento nuestros servidores no se encuentran disponibles.\nIntenta de nuevo más tarde.",
+                        color = Color.White.copy(alpha = 0.75f),
+                        fontSize = 15.sp,
+                        lineHeight = 22.sp,
+                        textAlign = TextAlign.Center
+                    )
+                    Spacer(Modifier.height(28.dp))
+                    Button(
+                        onClick = {
+                            showNoServersOverlay = false
+                            playerKey = null
+                            currentStreamUrl = null
+                            onBack()
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE50914))
+                    ) {
+                        Text("Volver", color = Color.White, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+    }
+}
